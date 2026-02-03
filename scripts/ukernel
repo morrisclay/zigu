@@ -1,0 +1,456 @@
+#!/usr/bin/env python3
+import argparse
+import os
+import shutil
+import subprocess
+import sys
+import tarfile
+import time
+
+try:
+    import tomllib  # Python 3.11+
+except ModuleNotFoundError:  # pragma: no cover
+    tomllib = None
+
+
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+
+def _project_name():
+    return os.path.basename(os.path.abspath(ROOT))
+
+
+def _ensure_dir(path):
+    os.makedirs(path, exist_ok=True)
+
+
+def _write_file(path, content):
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+
+
+def _read_ukernel_toml():
+    path = os.path.join(ROOT, "ukernel.toml")
+    if not os.path.exists(path):
+        return None
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+def _load_config():
+    path = os.path.join(ROOT, "ukernel.toml")
+    if not os.path.exists(path):
+        return None
+    if tomllib is None:
+        return None
+    with open(path, "rb") as f:
+        return tomllib.load(f)
+
+
+def _parse_project_name(toml_text):
+    if not toml_text:
+        return None
+    for line in toml_text.splitlines():
+        line = line.strip()
+        if line.startswith("name"):
+            parts = line.split("=", 1)
+            if len(parts) == 2:
+                return parts[1].strip().strip('"')
+    return None
+
+
+def _parse_entrypoint(toml_text):
+    if not toml_text:
+        return None
+    for line in toml_text.splitlines():
+        line = line.strip()
+        if line.startswith("entry"):
+            parts = line.split("=", 1)
+            if len(parts) == 2:
+                return parts[1].strip().strip('"')
+    return None
+
+
+def _resolve_project_name(cfg, toml_text):
+    if cfg:
+        project = cfg.get("project", {})
+        name = project.get("name")
+        if name:
+            return name
+    return _parse_project_name(toml_text)
+
+
+def _resolve_entrypoint(cfg, toml_text):
+    if cfg:
+        project = cfg.get("project", {})
+        entry = project.get("entry")
+        if entry:
+            return entry
+    return _parse_entrypoint(toml_text) or "src/main.py"
+
+
+def _run_cmd(cmd):
+    print("+", " ".join(cmd))
+    try:
+        res = subprocess.run(cmd, cwd=ROOT)
+    except FileNotFoundError:
+        print(f"Missing tool: {cmd[0]}", file=sys.stderr)
+        return 1
+    return res.returncode
+
+
+def _write_entrypoint_file(entrypoint):
+    entry_path = os.path.join(ROOT, "kernel", "entrypoint.zig")
+    content = f'pub const entrypoint = "{entrypoint}";\n'
+    existing = None
+    if os.path.exists(entry_path):
+        with open(entry_path, "r", encoding="utf-8") as f:
+            existing = f.read()
+    if existing != content:
+        _write_file(entry_path, content)
+
+
+def cmd_init(args):
+    name = args.name or _project_name()
+    lang = args.lang or "python"
+
+    ukernel_toml = os.path.join(ROOT, "ukernel.toml")
+    if not os.path.exists(ukernel_toml):
+        _write_file(
+            ukernel_toml,
+            f"""[project]
+name = "{name}"
+language = "{lang}"
+entry = "src/main.py"
+
+[env]
+base = "python-3.12"
+
+[build]
+adapter = "python"
+
+[run]
+vcpu = 1
+memory_mb = 256
+net = "tap"
+""",
+        )
+        print("Created ukernel.toml")
+    else:
+        print("ukernel.toml already exists (skipping)")
+
+    _ensure_dir(os.path.join(ROOT, "src"))
+    main_py = os.path.join(ROOT, "src", "main.py")
+    if not os.path.exists(main_py):
+        _write_file(
+            main_py,
+            """import asyncio
+import time
+
+
+async def heartbeat():
+    while True:
+        ts = time.time()
+        print(f"heartbeat {ts}")
+        await asyncio.sleep(1)
+
+
+async def main():
+    print("worker starting")
+    await heartbeat()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+""",
+        )
+        print("Created src/main.py")
+    else:
+        print("src/main.py already exists (skipping)")
+
+    _ensure_dir(os.path.join(ROOT, "env"))
+    env_file = os.path.join(ROOT, "env", "ukernel.env")
+    if not os.path.exists(env_file):
+        _write_file(
+            env_file,
+            "# ukernel environment placeholders\n"
+            "PYTHON=python3.12\n"
+        )
+        print("Created env/ukernel.env")
+    else:
+        print("env/ukernel.env already exists (skipping)")
+
+
+def cmd_build(args):
+    toml_text = _read_ukernel_toml()
+    if not toml_text:
+        print("Missing ukernel.toml. Run `ukernel init` first.", file=sys.stderr)
+        return 1
+    cfg = _load_config()
+
+    entrypoint = _resolve_entrypoint(cfg, toml_text)
+    _write_entrypoint_file(entrypoint)
+
+    cmd = ["zig", "build"]
+    if args.release:
+        cmd += ["-Doptimize=ReleaseSmall"]
+    rc = _run_cmd(cmd)
+    if rc != 0:
+        return rc
+
+    build_dir = os.path.join(ROOT, "build")
+    _ensure_dir(build_dir)
+
+    kernel_src = os.path.join(ROOT, "zig-out", "bin", "ukernel")
+    if not os.path.exists(kernel_src):
+        print("Missing kernel artifact: zig-out/bin/ukernel", file=sys.stderr)
+        return 1
+    kernel_out = os.path.join(build_dir, "vmlinux")
+    shutil.copy2(kernel_src, kernel_out)
+
+    bundle_path = os.path.join(build_dir, "bundle.tgz")
+    with tarfile.open(bundle_path, "w:gz") as tar:
+        if os.path.exists(os.path.join(ROOT, "src")):
+            tar.add(os.path.join(ROOT, "src"), arcname="src")
+        tar.add(os.path.join(ROOT, "ukernel.toml"), arcname="ukernel.toml")
+        env_path = os.path.join(ROOT, "env", "ukernel.env")
+        if os.path.exists(env_path):
+            tar.add(env_path, arcname="env/ukernel.env")
+
+    adapter_src = os.path.join(ROOT, "adapter", "python-3.12")
+    adapter_dir = os.path.join(build_dir, "adapter", "python-3.12")
+    if os.path.isdir(adapter_src):
+        if os.path.exists(adapter_dir):
+            shutil.rmtree(adapter_dir)
+        shutil.copytree(adapter_src, adapter_dir)
+    else:
+        _ensure_dir(adapter_dir)
+        _write_file(
+            os.path.join(adapter_dir, "README.txt"),
+            "Placeholder adapter runtime (python-3.12)\n",
+        )
+    _write_file(
+        os.path.join(adapter_dir, "adapter.toml"),
+        f"""[adapter]
+language = "python"
+runtime = "python-3.12"
+entrypoint = "{entrypoint}"
+""",
+    )
+
+    print("Kernel: build/vmlinux")
+    print("Built workload bundle: build/bundle.tgz")
+    print("Adapter runtime: build/adapter/python-3.12")
+    return 0
+
+
+def cmd_pack(args):
+    toml_text = _read_ukernel_toml()
+    if not toml_text:
+        print("Missing ukernel.toml. Run `ukernel init` first.", file=sys.stderr)
+        return 1
+    cfg = _load_config()
+
+    name = _resolve_project_name(cfg, toml_text) or _project_name()
+    build_dir = os.path.join(ROOT, "build")
+    kernel_src = os.path.join(build_dir, "vmlinux")
+    bundle_src = os.path.join(build_dir, "bundle.tgz")
+    adapter_src = os.path.join(build_dir, "adapter", "python-3.12")
+    if not os.path.exists(kernel_src):
+        print("Missing build/vmlinux. Run `ukernel build` first.", file=sys.stderr)
+        return 1
+    if not os.path.exists(bundle_src):
+        print("Missing build/bundle.tgz. Run `ukernel build` first.", file=sys.stderr)
+        return 1
+
+    dist_dir = os.path.join(ROOT, "dist")
+    _ensure_dir(dist_dir)
+
+    vmlinux_out = os.path.join(dist_dir, f"{name}.vmlinux")
+    shutil.copy2(kernel_src, vmlinux_out)
+
+    rootfs_dir = os.path.join(build_dir, "rootfs")
+    if os.path.exists(rootfs_dir):
+        shutil.rmtree(rootfs_dir)
+    _ensure_dir(rootfs_dir)
+    _ensure_dir(os.path.join(rootfs_dir, "adapter"))
+    shutil.copy2(os.path.join(ROOT, "ukernel.toml"), os.path.join(rootfs_dir, "ukernel.toml"))
+    shutil.copy2(bundle_src, os.path.join(rootfs_dir, "bundle.tgz"))
+    env_src = os.path.join(ROOT, "env", "ukernel.env")
+    if os.path.exists(env_src):
+        _ensure_dir(os.path.join(rootfs_dir, "env"))
+        shutil.copy2(env_src, os.path.join(rootfs_dir, "env", "ukernel.env"))
+    if os.path.isdir(adapter_src):
+        shutil.copytree(adapter_src, os.path.join(rootfs_dir, "adapter", "python-3.12"))
+
+    rootfs_tar = os.path.join(dist_dir, f"{name}.rootfs.tar")
+    with tarfile.open(rootfs_tar, "w") as tar:
+        tar.add(rootfs_dir, arcname=".")
+
+    mkfs = shutil.which("mkfs.ext4") or shutil.which("mke2fs")
+    if mkfs:
+        image_path = args.image or os.path.join(dist_dir, f"{name}.ext4")
+        size_mb = args.size_mb or 64
+        cmd = [mkfs, "-d", rootfs_dir, "-F", image_path, f"{size_mb}M"]
+        rc = _run_cmd(cmd)
+        if rc != 0:
+            return rc
+        print(f"Rootfs image: {os.path.relpath(image_path, ROOT)}")
+    else:
+        print("No mkfs.ext4 available; wrote rootfs tarball instead.")
+        print(f"Rootfs tar: {os.path.relpath(rootfs_tar, ROOT)}")
+
+    print(f"Kernel image: {os.path.relpath(vmlinux_out, ROOT)}")
+    return 0
+
+
+def cmd_run(args):
+    cfg = _load_config()
+    toml_text = _read_ukernel_toml() or ""
+    name = _resolve_project_name(cfg, toml_text) or _project_name()
+
+    vcpu = args.vcpu
+    mem = args.memory
+    net = args.net
+    if cfg:
+        run_cfg = cfg.get("run", {})
+        if vcpu is None:
+            vcpu = run_cfg.get("vcpu") or 1
+        if mem is None:
+            mem = run_cfg.get("memory_mb") or 256
+        if net is None:
+            net = run_cfg.get("net") or "tap"
+    vcpu = vcpu or 1
+    mem = mem or 256
+    net = net or "tap"
+
+    dist_dir = os.path.join(ROOT, "dist")
+    kernel = args.kernel or os.path.join(dist_dir, f"{name}.vmlinux")
+    rootfs = args.rootfs or os.path.join(dist_dir, f"{name}.ext4")
+    fc_bin = args.firecracker or os.environ.get("FIRECRACKER")
+    tap = args.tap or "tap0"
+    console_log = args.console_log or os.path.join(ROOT, "logs", "console.log")
+
+    if not fc_bin:
+        print("Missing Firecracker path. Pass --firecracker or set FIRECRACKER.", file=sys.stderr)
+        return 1
+    if not os.path.exists(kernel):
+        print(f"Missing kernel image: {kernel}", file=sys.stderr)
+        return 1
+    if not os.path.exists(rootfs):
+        print(f"Missing rootfs image: {rootfs}", file=sys.stderr)
+        return 1
+
+    _ensure_dir(os.path.dirname(console_log))
+    cmd = [
+        os.path.join(ROOT, "scripts", "run_fc.sh"),
+        fc_bin,
+        kernel,
+        rootfs,
+        tap,
+        console_log,
+    ]
+    rc = _run_cmd(cmd)
+    if rc != 0:
+        return rc
+    print(f"VM console: {os.path.relpath(console_log, ROOT)}")
+    print(f"Config: vcpu={vcpu} mem={mem} net={net}")
+    return 0
+
+def _tail_follow(path):
+    with open(path, "r", encoding="utf-8") as f:
+        f.seek(0, os.SEEK_END)
+        while True:
+            line = f.readline()
+            if line:
+                print(line, end="")
+            else:
+                time.sleep(0.25)
+
+
+def cmd_logs(args):
+    console_log = os.path.join(ROOT, "logs", "console.log")
+    if not os.path.exists(console_log):
+        print("No logs found at logs/console.log", file=sys.stderr)
+        return 1
+
+    if args.follow:
+        _tail_follow(console_log)
+        return 0
+
+    with open(console_log, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    for line in lines[-50:]:
+        print(line, end="")
+    return 0
+
+
+def cmd_adapter(args):
+    root = args.root or ROOT
+    adapter_dir = os.path.join(ROOT, "adapter", "python-3.12")
+    runtime_py = os.path.join(adapter_dir, "runtime.py")
+    if not os.path.exists(runtime_py):
+        print("Missing adapter runtime. Expected adapter/python-3.12/runtime.py", file=sys.stderr)
+        return 1
+
+    env = os.environ.copy()
+    env["UKERNEL_ROOT"] = root
+    if args.entry:
+        env["UKERNEL_ENTRY"] = args.entry
+
+    cmd = [sys.executable, runtime_py]
+    return subprocess.call(cmd, env=env)
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(prog="ukernel")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p_init = sub.add_parser("init")
+    p_init.add_argument("--name")
+    p_init.add_argument("--lang")
+    p_init.add_argument("--template")
+    p_init.set_defaults(func=cmd_init)
+
+    p_build = sub.add_parser("build")
+    p_build.add_argument("--release", action="store_true")
+    p_build.set_defaults(func=cmd_build)
+
+    p_pack = sub.add_parser("pack")
+    p_pack.add_argument("--image")
+    p_pack.add_argument("--size-mb", type=int)
+    p_pack.add_argument("--readonly", action="store_true")
+    p_pack.set_defaults(func=cmd_pack)
+
+    p_run = sub.add_parser("run")
+    p_run.add_argument("--firecracker")
+    p_run.add_argument("--kernel")
+    p_run.add_argument("--rootfs")
+    p_run.add_argument("--tap", default="tap0")
+    p_run.add_argument("--console-log")
+    p_run.add_argument("--vcpu", type=int, default=None)
+    p_run.add_argument("--memory", type=int, default=None)
+    p_run.add_argument("--net", default=None)
+    p_run.set_defaults(func=cmd_run)
+
+    p_logs = sub.add_parser("logs")
+    p_logs.add_argument("--follow", action="store_true")
+    p_logs.set_defaults(func=cmd_logs)
+
+    p_adapter = sub.add_parser("adapter")
+    p_adapter.add_argument("--root")
+    p_adapter.add_argument("--entry")
+    p_adapter.set_defaults(func=cmd_adapter)
+
+    return parser
+
+
+def main():
+    parser = build_parser()
+    args = parser.parse_args()
+    rc = args.func(args)
+    raise SystemExit(rc)
+
+
+if __name__ == "__main__":
+    main()
