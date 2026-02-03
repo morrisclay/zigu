@@ -2,6 +2,26 @@
 
 This repo contains the early MVP for a Cloud µKernel guest designed to run on Firecracker with a minimal ABI and a flox-like developer experience.
 
+## Why This Exists (and Why It Matters)
+This project explores **user-space kernel primitives**: per‑workload µkernels with explicit scheduling, I/O, and memory control, without Linux in the hot path. These are not “unikernels as we know them” — the intent is composable, ephemeral kernels that can be tailored to a single workload.
+
+### What’s missing today
+- Unikernels are brittle and tooling‑poor.
+- eBPF is powerful but constrained and unsafe for whole‑program logic.
+- The Linux kernel is overkill for many cloud workloads.
+
+### Why Zig
+- Strong fit for OS‑adjacent code with safety and clarity.
+- Compile‑time configuration strips kernels down to exactly what a workload needs.
+- No runtime → predictable syscall boundaries.
+- Safer than C, while staying highly expressive for this layer.
+
+### Transformative outcome (if successful)
+Cloud workloads that are their own kernel. This could enable:
+- Microsecond‑level cold starts
+- Radical isolation without heavyweight VMs
+- Custom schedulers per workload (latency vs throughput vs energy)
+
 ## Quickstart (Agent Primer)
 
 ### 1) Key docs
