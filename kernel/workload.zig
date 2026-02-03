@@ -10,7 +10,7 @@ pub fn workloadMain() void {
     if (abi.cap_acquire(abi.CAP_LOG, &caps[0]) != abi.OK) return;
     if (abi.cap_acquire(abi.CAP_TIME, &caps[1]) != abi.OK) return;
     if (abi.cap_acquire(abi.CAP_TASK, &caps[2]) != abi.OK) return;
-    if (abi.cap_enter(&caps[0], @intCast(u32, caps.len)) != abi.OK) return;
+    if (abi.cap_enter(&caps[0], @intCast(caps.len)) != abi.OK) return;
 
     adapter.launch();
 
@@ -24,7 +24,7 @@ pub fn workloadMain() void {
     _ = abi.log_write(0, @intFromPtr(msg1.ptr), msg1.len);
 
     var buf: [24]u8 = undefined;
-    const len = u64ToDec(@intCast(u64, t), &buf);
+    const len = u64ToDec(t, &buf);
     _ = abi.log_write(0, @intFromPtr(buf[0..len].ptr), len);
 
     const msg2 = "\nworkload: yield\n";
@@ -36,9 +36,9 @@ pub fn workloadMain() void {
         const prefix = "workload: heartbeat ";
         _ = abi.log_write(0, @intFromPtr(prefix.ptr), prefix.len);
 
-        var buf: [24]u8 = undefined;
-        const len = u64ToDec(heartbeat, &buf);
-        _ = abi.log_write(0, @intFromPtr(buf[0..len].ptr), len);
+        var hb_buf: [24]u8 = undefined;
+        const hb_len = u64ToDec(heartbeat, &hb_buf);
+        _ = abi.log_write(0, @intFromPtr(hb_buf[0..hb_len].ptr), hb_len);
 
         const suffix = "\n";
         _ = abi.log_write(0, @intFromPtr(suffix.ptr), suffix.len);
@@ -58,7 +58,7 @@ fn u64ToDec(value: u64, out: *[24]u8) usize {
     var i: usize = 0;
     var v = value;
     while (v > 0) : (v /= 10) {
-        tmp[i] = @intCast(u8, '0' + @intCast(u8, v % 10));
+        tmp[i] = @intCast('0' + @as(u8, @intCast(v % 10)));
         i += 1;
     }
 

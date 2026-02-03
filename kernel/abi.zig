@@ -199,7 +199,7 @@ fn rdtsc() u64 {
     return (@as(u64, hi) << 32) | @as(u64, lo);
 }
 
-export fn cap_acquire(kind: u32, handle_out: ?*handle_t) callconv(.c) result_t {
+pub export fn cap_acquire(kind: u32, handle_out: ?*handle_t) callconv(.c) result_t {
     if (handle_out == null) return ERR_INVALID;
     switch (kind) {
         CAP_LOG => {
@@ -235,7 +235,7 @@ export fn cap_acquire(kind: u32, handle_out: ?*handle_t) callconv(.c) result_t {
     }
 }
 
-export fn cap_drop(cap: handle_t) callconv(.c) result_t {
+pub export fn cap_drop(cap: handle_t) callconv(.c) result_t {
     const k = capKindFrom(cap) orelse return ERR_INVALID;
     const idx = kindIndex(k);
     cap_gen[idx] +%= 1;
@@ -245,7 +245,7 @@ export fn cap_drop(cap: handle_t) callconv(.c) result_t {
     return OK;
 }
 
-export fn cap_enter(caps: ?*handle_t, cap_count: u32) callconv(.c) result_t {
+pub export fn cap_enter(caps: ?*handle_t, cap_count: u32) callconv(.c) result_t {
     if (cap_count > MaxCaps) return ERR_INVALID;
     if (cap_count > 0 and caps == null) return ERR_INVALID;
     const cap_ptr: [*]handle_t = if (caps) |p| @ptrCast(p) else undefined;
@@ -265,7 +265,7 @@ export fn cap_enter(caps: ?*handle_t, cap_count: u32) callconv(.c) result_t {
     return OK;
 }
 
-export fn cap_exit() callconv(.c) result_t {
+pub export fn cap_exit() callconv(.c) result_t {
     active_mask = 0;
     audit("cap: exit\n");
     return OK;
@@ -284,7 +284,7 @@ pub fn resetCapsForWorkload(mask: u32) void {
     audit("cap: reset\n");
 }
 
-export fn abi_version(major: ?*u32, minor: ?*u32, patch: ?*u32) callconv(.c) result_t {
+pub export fn abi_version(major: ?*u32, minor: ?*u32, patch: ?*u32) callconv(.c) result_t {
     if (major == null or minor == null or patch == null) return ERR_INVALID;
     major.?.* = ABI_MAJOR;
     minor.?.* = ABI_MINOR;
@@ -292,13 +292,13 @@ export fn abi_version(major: ?*u32, minor: ?*u32, patch: ?*u32) callconv(.c) res
     return OK;
 }
 
-export fn abi_features(bitset_out: ?*u64) callconv(.c) result_t {
+pub export fn abi_features(bitset_out: ?*u64) callconv(.c) result_t {
     if (bitset_out == null) return ERR_INVALID;
     bitset_out.?.* = 0;
     return OK;
 }
 
-export fn abi_feature_enabled(feature_id: u32, enabled_out: ?*u32) callconv(.c) result_t {
+pub export fn abi_feature_enabled(feature_id: u32, enabled_out: ?*u32) callconv(.c) result_t {
     if (enabled_out == null) return ERR_INVALID;
     const features: u64 = 0;
     if (feature_id >= 64) {
@@ -311,7 +311,7 @@ export fn abi_feature_enabled(feature_id: u32, enabled_out: ?*u32) callconv(.c) 
     return OK;
 }
 
-export fn task_spawn(_: ptr_t, _: ptr_t, caps: ?*handle_t, cap_count: u32, _: u32, _: ?*handle_t) callconv(.c) result_t {
+pub export fn task_spawn(_: ptr_t, _: ptr_t, caps: ?*handle_t, cap_count: u32, _: u32, _: ?*handle_t) callconv(.c) result_t {
     if (!allow(.task)) return ERR_PERMISSION;
     if (cap_count > 0 and caps == null) return ERR_INVALID;
     const cap_ptr: [*]handle_t = if (caps) |p| @ptrCast(p) else undefined;
@@ -326,7 +326,7 @@ export fn task_spawn(_: ptr_t, _: ptr_t, caps: ?*handle_t, cap_count: u32, _: u3
     return ERR_UNSUPPORTED;
 }
 
-export fn task_yield() callconv(.c) result_t {
+pub export fn task_yield() callconv(.c) result_t {
     if (!allow(.task)) return ERR_PERMISSION;
     if (comptime builtin.cpu.arch == .x86_64) {
         asm volatile ("pause");
@@ -334,23 +334,23 @@ export fn task_yield() callconv(.c) result_t {
     return OK;
 }
 
-export fn task_sleep(duration: time_ns) callconv(.c) result_t {
+pub export fn task_sleep(duration: time_ns) callconv(.c) result_t {
     if (!allow(.task)) return ERR_PERMISSION;
     if (duration == 0) return OK;
     return ERR_UNSUPPORTED;
 }
 
-export fn task_set_priority(_: handle_t, _: u32) callconv(.c) result_t {
+pub export fn task_set_priority(_: handle_t, _: u32) callconv(.c) result_t {
     if (!allow(.task)) return ERR_PERMISSION;
     return ERR_UNSUPPORTED;
 }
 
-export fn task_get_stats(_: handle_t, _: ptr_t) callconv(.c) result_t {
+pub export fn task_get_stats(_: handle_t, _: ptr_t) callconv(.c) result_t {
     if (!allow(.task)) return ERR_PERMISSION;
     return ERR_UNSUPPORTED;
 }
 
-export fn task_exit(_: i32) callconv(.c) result_t {
+pub export fn task_exit(_: i32) callconv(.c) result_t {
     if (!allow(.task)) return ERR_PERMISSION;
     while (true) {
         if (comptime builtin.cpu.arch == .x86_64) {
@@ -359,19 +359,19 @@ export fn task_exit(_: i32) callconv(.c) result_t {
     }
 }
 
-export fn time_now(out: ?*time_ns) callconv(.c) result_t {
+pub export fn time_now(out: ?*time_ns) callconv(.c) result_t {
     if (!allow(.time)) return ERR_PERMISSION;
     if (out == null) return ERR_INVALID;
     out.?.* = rdtsc();
     return OK;
 }
 
-export fn time_deadline(_: time_ns, _: ?*handle_t) callconv(.c) result_t {
+pub export fn time_deadline(_: time_ns, _: ?*handle_t) callconv(.c) result_t {
     if (!allow(.time)) return ERR_PERMISSION;
     return ERR_UNSUPPORTED;
 }
 
-export fn mem_alloc(bytes: size_t, flags: u32, out_ptr: ?*ptr_t) callconv(.c) result_t {
+pub export fn mem_alloc(bytes: size_t, flags: u32, out_ptr: ?*ptr_t) callconv(.c) result_t {
     if (!allow(.mem)) return ERR_PERMISSION;
     if (out_ptr == null) return ERR_INVALID;
     if (bytes == 0) return ERR_INVALID;
@@ -404,7 +404,7 @@ export fn mem_alloc(bytes: size_t, flags: u32, out_ptr: ?*ptr_t) callconv(.c) re
     return OK;
 }
 
-export fn mem_free(ptr: ptr_t) callconv(.c) result_t {
+pub export fn mem_free(ptr: ptr_t) callconv(.c) result_t {
     if (!allow(.mem)) return ERR_PERMISSION;
     if (ptr == 0) return ERR_INVALID;
 
@@ -423,22 +423,22 @@ export fn mem_free(ptr: ptr_t) callconv(.c) result_t {
     return ERR_INVALID; // Not found or double-free
 }
 
-export fn mem_map(_: ptr_t, _: size_t, _: u32) callconv(.c) result_t {
+pub export fn mem_map(_: ptr_t, _: size_t, _: u32) callconv(.c) result_t {
     if (!allow(.mem)) return ERR_PERMISSION;
     return ERR_UNSUPPORTED;
 }
 
-export fn mem_share(_: ptr_t, _: size_t, _: ?*handle_t) callconv(.c) result_t {
+pub export fn mem_share(_: ptr_t, _: size_t, _: ?*handle_t) callconv(.c) result_t {
     if (!allow(.mem)) return ERR_PERMISSION;
     return ERR_UNSUPPORTED;
 }
 
-export fn mem_unshare(_: handle_t) callconv(.c) result_t {
+pub export fn mem_unshare(_: handle_t) callconv(.c) result_t {
     if (!allow(.mem)) return ERR_PERMISSION;
     return ERR_UNSUPPORTED;
 }
 
-export fn io_open(path_ptr: ptr_t, flags: u32, handle_out: ?*handle_t) callconv(.c) result_t {
+pub export fn io_open(path_ptr: ptr_t, flags: u32, handle_out: ?*handle_t) callconv(.c) result_t {
     if (!allow(.io)) return ERR_PERMISSION;
     _ = flags;
     if (handle_out == null) return ERR_INVALID;
@@ -446,7 +446,7 @@ export fn io_open(path_ptr: ptr_t, flags: u32, handle_out: ?*handle_t) callconv(
     return allocHandle(io_table[0..], HANDLE_IO, handle_out.?);
 }
 
-export fn io_read(io: handle_t, buf_ptr: ptr_t, len: size_t, read_out: ?*size_t) callconv(.c) result_t {
+pub export fn io_read(io: handle_t, buf_ptr: ptr_t, len: size_t, read_out: ?*size_t) callconv(.c) result_t {
     if (!allow(.io)) return ERR_PERMISSION;
     if (validateHandle(io_table[0..], HANDLE_IO, io) == null) return ERR_INVALID;
     if (len > 0 and buf_ptr == 0) return ERR_INVALID;
@@ -454,7 +454,7 @@ export fn io_read(io: handle_t, buf_ptr: ptr_t, len: size_t, read_out: ?*size_t)
     return ERR_WOULD_BLOCK;
 }
 
-export fn io_write(io: handle_t, buf_ptr: ptr_t, len: size_t, wrote_out: ?*size_t) callconv(.c) result_t {
+pub export fn io_write(io: handle_t, buf_ptr: ptr_t, len: size_t, wrote_out: ?*size_t) callconv(.c) result_t {
     if (!allow(.io)) return ERR_PERMISSION;
     if (validateHandle(io_table[0..], HANDLE_IO, io) == null) return ERR_INVALID;
     if (len > 0 and buf_ptr == 0) return ERR_INVALID;
@@ -462,12 +462,12 @@ export fn io_write(io: handle_t, buf_ptr: ptr_t, len: size_t, wrote_out: ?*size_
     return OK;
 }
 
-export fn io_close(io: handle_t) callconv(.c) result_t {
+pub export fn io_close(io: handle_t) callconv(.c) result_t {
     if (!allow(.io)) return ERR_PERMISSION;
     return closeHandle(io_table[0..], HANDLE_IO, io);
 }
 
-export fn io_poll(handles: ?*handle_t, count: u32, timeout: time_ns, events_out: ptr_t, count_out: ?*u32) callconv(.c) result_t {
+pub export fn io_poll(handles: ?*handle_t, count: u32, timeout: time_ns, events_out: ptr_t, count_out: ?*u32) callconv(.c) result_t {
     if (!allow(.io)) return ERR_PERMISSION;
     _ = handles;
     _ = count;
@@ -495,14 +495,14 @@ export fn io_poll(handles: ?*handle_t, count: u32, timeout: time_ns, events_out:
     return ERR_TIMEOUT;
 }
 
-export fn ipc_channel_create(flags: u32, handle_out: ?*handle_t) callconv(.c) result_t {
+pub export fn ipc_channel_create(flags: u32, handle_out: ?*handle_t) callconv(.c) result_t {
     if (!allow(.ipc)) return ERR_PERMISSION;
     _ = flags;
     if (handle_out == null) return ERR_INVALID;
     return allocHandle(ipc_table[0..], HANDLE_IPC, handle_out.?);
 }
 
-export fn ipc_send(ch: handle_t, buf_ptr: ptr_t, len: size_t, flags: u32) callconv(.c) result_t {
+pub export fn ipc_send(ch: handle_t, buf_ptr: ptr_t, len: size_t, flags: u32) callconv(.c) result_t {
     if (!allow(.ipc)) return ERR_PERMISSION;
     _ = flags;
     if (validateHandle(ipc_table[0..], HANDLE_IPC, ch) == null) return ERR_INVALID;
@@ -510,7 +510,7 @@ export fn ipc_send(ch: handle_t, buf_ptr: ptr_t, len: size_t, flags: u32) callco
     return OK;
 }
 
-export fn ipc_recv(ch: handle_t, buf_ptr: ptr_t, len: size_t, read_out: ?*size_t, flags: u32) callconv(.c) result_t {
+pub export fn ipc_recv(ch: handle_t, buf_ptr: ptr_t, len: size_t, read_out: ?*size_t, flags: u32) callconv(.c) result_t {
     if (!allow(.ipc)) return ERR_PERMISSION;
     _ = flags;
     if (validateHandle(ipc_table[0..], HANDLE_IPC, ch) == null) return ERR_INVALID;
@@ -519,12 +519,12 @@ export fn ipc_recv(ch: handle_t, buf_ptr: ptr_t, len: size_t, read_out: ?*size_t
     return ERR_WOULD_BLOCK;
 }
 
-export fn ipc_close(ch: handle_t) callconv(.c) result_t {
+pub export fn ipc_close(ch: handle_t) callconv(.c) result_t {
     if (!allow(.ipc)) return ERR_PERMISSION;
     return closeHandle(ipc_table[0..], HANDLE_IPC, ch);
 }
 
-export fn net_socket(domain: u32, type_: u32, protocol: u32, handle_out: ?*handle_t) callconv(.c) result_t {
+pub export fn net_socket(domain: u32, type_: u32, protocol: u32, handle_out: ?*handle_t) callconv(.c) result_t {
     if (!allow(.net)) return ERR_PERMISSION;
     _ = domain;
     _ = type_;
@@ -533,7 +533,7 @@ export fn net_socket(domain: u32, type_: u32, protocol: u32, handle_out: ?*handl
     return allocHandle(net_table[0..], HANDLE_NET, handle_out.?);
 }
 
-export fn net_bind(sock: handle_t, addr_ptr: ptr_t, addr_len: u32) callconv(.c) result_t {
+pub export fn net_bind(sock: handle_t, addr_ptr: ptr_t, addr_len: u32) callconv(.c) result_t {
     if (!allow(.net)) return ERR_PERMISSION;
     _ = addr_ptr;
     _ = addr_len;
@@ -541,7 +541,7 @@ export fn net_bind(sock: handle_t, addr_ptr: ptr_t, addr_len: u32) callconv(.c) 
     return OK;
 }
 
-export fn net_connect(sock: handle_t, addr_ptr: ptr_t, addr_len: u32) callconv(.c) result_t {
+pub export fn net_connect(sock: handle_t, addr_ptr: ptr_t, addr_len: u32) callconv(.c) result_t {
     if (!allow(.net)) return ERR_PERMISSION;
     _ = addr_ptr;
     _ = addr_len;
@@ -549,7 +549,7 @@ export fn net_connect(sock: handle_t, addr_ptr: ptr_t, addr_len: u32) callconv(.
     return OK;
 }
 
-export fn net_send(sock: handle_t, buf_ptr: ptr_t, len: size_t, flags: u32, wrote_out: ?*size_t) callconv(.c) result_t {
+pub export fn net_send(sock: handle_t, buf_ptr: ptr_t, len: size_t, flags: u32, wrote_out: ?*size_t) callconv(.c) result_t {
     if (!allow(.net)) return ERR_PERMISSION;
     _ = flags;
     if (validateHandle(net_table[0..], HANDLE_NET, sock) == null) return ERR_INVALID;
@@ -558,7 +558,7 @@ export fn net_send(sock: handle_t, buf_ptr: ptr_t, len: size_t, flags: u32, wrot
     return OK;
 }
 
-export fn net_recv(sock: handle_t, buf_ptr: ptr_t, len: size_t, flags: u32, read_out: ?*size_t) callconv(.c) result_t {
+pub export fn net_recv(sock: handle_t, buf_ptr: ptr_t, len: size_t, flags: u32, read_out: ?*size_t) callconv(.c) result_t {
     if (!allow(.net)) return ERR_PERMISSION;
     _ = flags;
     if (validateHandle(net_table[0..], HANDLE_NET, sock) == null) return ERR_INVALID;
@@ -567,12 +567,12 @@ export fn net_recv(sock: handle_t, buf_ptr: ptr_t, len: size_t, flags: u32, read
     return ERR_WOULD_BLOCK;
 }
 
-export fn net_close(sock: handle_t) callconv(.c) result_t {
+pub export fn net_close(sock: handle_t) callconv(.c) result_t {
     if (!allow(.net)) return ERR_PERMISSION;
     return closeHandle(net_table[0..], HANDLE_NET, sock);
 }
 
-export fn log_write(level: u32, msg_ptr: ptr_t, len: size_t) callconv(.c) result_t {
+pub export fn log_write(level: u32, msg_ptr: ptr_t, len: size_t) callconv(.c) result_t {
     if (!allow(.log)) return ERR_PERMISSION;
     if (len == 0) return OK;
     if (msg_ptr == 0) return ERR_INVALID;
@@ -589,17 +589,17 @@ export fn log_write(level: u32, msg_ptr: ptr_t, len: size_t) callconv(.c) result
     return OK;
 }
 
-export fn trace_span_begin(_: ptr_t, _: size_t, _: ?*handle_t) callconv(.c) result_t {
+pub export fn trace_span_begin(_: ptr_t, _: size_t, _: ?*handle_t) callconv(.c) result_t {
     if (!allow(.trace)) return ERR_PERMISSION;
     return ERR_UNSUPPORTED;
 }
 
-export fn trace_span_end(_: handle_t) callconv(.c) result_t {
+pub export fn trace_span_end(_: handle_t) callconv(.c) result_t {
     if (!allow(.trace)) return ERR_PERMISSION;
     return ERR_UNSUPPORTED;
 }
 
-export fn trace_event(_: handle_t, _: ptr_t, _: size_t, _: ptr_t, _: size_t) callconv(.c) result_t {
+pub export fn trace_event(_: handle_t, _: ptr_t, _: size_t, _: ptr_t, _: size_t) callconv(.c) result_t {
     if (!allow(.trace)) return ERR_PERMISSION;
     return ERR_UNSUPPORTED;
 }
