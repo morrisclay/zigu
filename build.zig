@@ -22,9 +22,18 @@ pub fn build(b: *std.Build) void {
         .root_module = exe_module,
     });
 
+    // Add PVH boot assembly for QEMU/Firecracker direct boot
+    exe.addAssemblyFile(b.path("kernel/pvh_boot.S"));
+
+    // Add multiboot2 header for QEMU/GRUB boot
+    exe.addAssemblyFile(b.path("kernel/multiboot.S"));
+
     exe.entry = .{ .symbol_name = "_start" };
     exe.pie = false;
     exe.setLinkerScript(b.path("kernel/linker.ld"));
+
+    // Force linker to use our PHDRS
+    exe.linkage = .static;
 
     b.installArtifact(exe);
 
