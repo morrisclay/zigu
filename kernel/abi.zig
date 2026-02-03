@@ -82,6 +82,19 @@ var ipc_table: [MaxIpc]HandleEntry = [_]HandleEntry{.{}} ** MaxIpc;
 var net_table: [MaxNet]HandleEntry = [_]HandleEntry{.{}} ** MaxNet;
 var io_table: [MaxIo]HandleEntry = [_]HandleEntry{.{}} ** MaxIo;
 
+// Memory allocator state
+const HEAP_SIZE: usize = 1024 * 1024; // 1MB
+var heap: [HEAP_SIZE]u8 align(16) = undefined;
+var heap_top: usize = 0;
+
+const MaxAllocs = 256;
+const AllocEntry = struct {
+    base: usize = 0,
+    size: usize = 0,
+    in_use: bool = false,
+};
+var alloc_table: [MaxAllocs]AllocEntry = [_]AllocEntry{.{}} ** MaxAllocs;
+
 const AuditEnabled = !builtin.is_test;
 
 fn audit(msg: []const u8) void {
@@ -210,7 +223,14 @@ export fn cap_acquire(kind: u32, handle_out: ?*handle_t) callconv(.c) result_t {
             audit("cap: acquire task\n");
             return OK;
         },
-        CAP_MEM, CAP_IO, CAP_IPC, CAP_NET, CAP_TRACE => return ERR_UNSUPPORTED,
+        CAP_MEM => {
+            if ((policy_mask & capBit(.mem)) == 0) return ERR_PERMISSION;
+            handle_out.?.* = makeCap(.mem);
+            issued_mask |= capBit(.mem);
+            audit("cap: acquire mem\n");
+            return OK;
+        },
+        CAP_IO, CAP_IPC, CAP_NET, CAP_TRACE => return ERR_UNSUPPORTED,
         else => return ERR_INVALID,
     }
 }
@@ -351,14 +371,56 @@ export fn time_deadline(_: time_ns, _: ?*handle_t) callconv(.c) result_t {
     return ERR_UNSUPPORTED;
 }
 
-export fn mem_alloc(_: size_t, _: u32, _: ?*ptr_t) callconv(.c) result_t {
+export fn mem_alloc(bytes: size_t, flags: u32, out_ptr: ?*ptr_t) callconv(.c) result_t {
     if (!allow(.mem)) return ERR_PERMISSION;
-    return ERR_UNSUPPORTED;
+    if (out_ptr == null) return ERR_INVALID;
+    if (bytes == 0) return ERR_INVALID;
+    _ = flags; // MEM_ZEROED etc. - ignore for now
+
+    // Align to 16 bytes
+    const aligned: usize = (bytes + 15) & ~@as(usize, 15);
+    if (heap_top + aligned > HEAP_SIZE) return ERR_NOMEM;
+
+    // Find free slot in alloc table
+    var slot: ?usize = null;
+    for (alloc_table, 0..) |entry, i| {
+        if (!entry.in_use) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot == null) return ERR_NOMEM;
+
+    const ptr = @intFromPtr(&heap[heap_top]);
+    alloc_table[slot.?] = .{
+        .base = ptr,
+        .size = aligned,
+        .in_use = true,
+    };
+    heap_top += aligned;
+
+    out_ptr.?.* = ptr;
+    audit("mem: alloc\n");
+    return OK;
 }
 
-export fn mem_free(_: ptr_t) callconv(.c) result_t {
+export fn mem_free(ptr: ptr_t) callconv(.c) result_t {
     if (!allow(.mem)) return ERR_PERMISSION;
-    return ERR_UNSUPPORTED;
+    if (ptr == 0) return ERR_INVALID;
+
+    // Find allocation in table
+    for (&alloc_table) |*entry| {
+        if (entry.in_use and entry.base == ptr) {
+            entry.in_use = false;
+            // If this was the last allocation, reclaim space
+            if (entry.base + entry.size == @intFromPtr(&heap[heap_top])) {
+                heap_top -= entry.size;
+            }
+            audit("mem: free\n");
+            return OK;
+        }
+    }
+    return ERR_INVALID; // Not found or double-free
 }
 
 export fn mem_map(_: ptr_t, _: size_t, _: u32) callconv(.c) result_t {
@@ -644,4 +706,62 @@ test "cap_drop invalidates old handles" {
     try std.testing.expectEqual(OK, cap_drop(handle));
 
     try std.testing.expectEqual(ERR_PERMISSION, cap_enter(&handle, 1));
+}
+
+test "mem_alloc basic" {
+    const policy = capMask(CAP_MEM);
+    resetCapsForWorkload(policy);
+    heap_top = 0; // Reset heap for test
+
+    var cap: handle_t = 0;
+    try std.testing.expectEqual(OK, cap_acquire(CAP_MEM, &cap));
+    try std.testing.expectEqual(OK, cap_enter(&cap, 1));
+
+    var ptr: ptr_t = 0;
+    try std.testing.expectEqual(OK, mem_alloc(64, 0, &ptr));
+    try std.testing.expect(ptr != 0);
+
+    try std.testing.expectEqual(OK, mem_free(ptr));
+}
+
+test "mem_alloc alignment" {
+    const policy = capMask(CAP_MEM);
+    resetCapsForWorkload(policy);
+    heap_top = 0;
+    // Reset alloc table for test
+    for (&alloc_table) |*entry| {
+        entry.* = .{};
+    }
+
+    var cap: handle_t = 0;
+    _ = cap_acquire(CAP_MEM, &cap);
+    _ = cap_enter(&cap, 1);
+
+    var ptr1: ptr_t = 0;
+    var ptr2: ptr_t = 0;
+    try std.testing.expectEqual(OK, mem_alloc(1, 0, &ptr1));
+    try std.testing.expectEqual(OK, mem_alloc(1, 0, &ptr2));
+
+    // Should be 16-byte aligned
+    try std.testing.expectEqual(@as(usize, 16), ptr2 - ptr1);
+}
+
+test "mem_alloc nomem" {
+    const policy = capMask(CAP_MEM);
+    resetCapsForWorkload(policy);
+    heap_top = HEAP_SIZE - 8; // Near end
+
+    var cap: handle_t = 0;
+    _ = cap_acquire(CAP_MEM, &cap);
+    _ = cap_enter(&cap, 1);
+
+    var ptr: ptr_t = 0;
+    try std.testing.expectEqual(ERR_NOMEM, mem_alloc(1024, 0, &ptr));
+}
+
+test "mem_alloc permission denied without cap" {
+    resetCapsForWorkload(0);
+
+    var ptr: ptr_t = 0;
+    try std.testing.expectEqual(ERR_PERMISSION, mem_alloc(64, 0, &ptr));
 }
