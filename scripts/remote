@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+# Remote development wrapper for Zigu
+# Usage: ./scripts/remote <command>
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+
+# Load config
+if [ -f "$PROJECT_DIR/.remote" ]; then
+  source "$PROJECT_DIR/.remote"
+fi
+
+REMOTE_HOST="${ZIGU_REMOTE:-}"
+REMOTE_DIR="${ZIGU_REMOTE_DIR:-~/zigu}"
+
+if [ -z "$REMOTE_HOST" ]; then
+  echo "Error: ZIGU_REMOTE not set. Create .remote file or export ZIGU_REMOTE=user@host"
+  exit 1
+fi
+
+cmd="${1:-help}"
+shift || true
+
+case "$cmd" in
+  shell)
+    echo "Connecting to $REMOTE_HOST..."
+    ssh -t "$REMOTE_HOST" "cd $REMOTE_DIR && exec \$SHELL -l"
+    ;;
+
+  build)
+    echo "Building on $REMOTE_HOST..."
+    ssh "$REMOTE_HOST" "cd $REMOTE_DIR && zig build $*"
+    ;;
+
+  test)
+    echo "Running tests on $REMOTE_HOST..."
+    ssh "$REMOTE_HOST" "cd $REMOTE_DIR && zig build test $*"
+    ;;
+
+  run)
+    echo "Running in Firecracker on $REMOTE_HOST..."
+    ssh -t "$REMOTE_HOST" "cd $REMOTE_DIR && FIRECRACKER=/usr/local/bin/firecracker ./scripts/ukernel run $*"
+    ;;
+
+  logs)
+    echo "Tailing logs on $REMOTE_HOST..."
+    ssh -t "$REMOTE_HOST" "cd $REMOTE_DIR && ./scripts/ukernel logs $*"
+    ;;
+
+  ukernel)
+    echo "Running ukernel $* on $REMOTE_HOST..."
+    ssh -t "$REMOTE_HOST" "cd $REMOTE_DIR && ./scripts/ukernel $*"
+    ;;
+
+  exec)
+    echo "Running: $*"
+    ssh -t "$REMOTE_HOST" "cd $REMOTE_DIR && $*"
+    ;;
+
+  sync-status)
+    mutagen sync list --label-selector=zigu
+    ;;
+
+  sync-start)
+    echo "Starting Mutagen sync..."
+    mutagen sync create "$PROJECT_DIR" "$REMOTE_HOST:$REMOTE_DIR" \
+      --name=zigu \
+      --label=zigu \
+      --ignore=".zig-cache,zig-out,dist,build,.git,.flox" \
+      --sync-mode=two-way-resolved
+    echo "Sync started. Run './scripts/remote sync-status' to check."
+    ;;
+
+  sync-stop)
+    echo "Stopping Mutagen sync..."
+    mutagen sync terminate --label-selector=zigu
+    ;;
+
+  setup)
+    echo "Running remote setup on $REMOTE_HOST..."
+    ssh "$REMOTE_HOST" 'bash -s' < "$SCRIPT_DIR/remote-setup"
+    ;;
+
+  help|--help|-h)
+    cat <<EOF
+Zigu Remote Development
+
+Usage: ./scripts/remote <command> [args]
+
+Commands:
+  shell        SSH into remote and cd to project
+  build        Run zig build on remote
+  test         Run zig build test on remote
+  run          Run kernel in Firecracker
+  logs         Tail Firecracker console output
+  ukernel      Run ./scripts/ukernel with args
+  exec <cmd>   Run arbitrary command on remote
+
+Sync:
+  sync-start   Start Mutagen file sync
+  sync-stop    Stop Mutagen file sync
+  sync-status  Check sync status
+
+Setup:
+  setup        Install dependencies on remote (Zig, Firecracker, etc.)
+
+Config:
+  Set ZIGU_REMOTE in .remote file or environment
+  Current: ${REMOTE_HOST:-not set}
+EOF
+    ;;
+
+  *)
+    echo "Unknown command: $cmd"
+    echo "Run './scripts/remote help' for usage"
+    exit 1
+    ;;
+esac

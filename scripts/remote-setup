@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# One-time setup for Zigu remote development host
+# This script runs ON the remote machine
+
+set -eux -o pipefail
+
+echo "=== Zigu Remote Setup ==="
+
+# Detect architecture
+ARCH=$(uname -m)
+echo "Architecture: $ARCH"
+
+# Update packages
+sudo apt-get update
+sudo apt-get install -y \
+  build-essential \
+  curl \
+  git \
+  python3 \
+  python3-pip \
+  e2fsprogs \
+  jq
+
+# Check KVM
+echo "=== Checking KVM ==="
+if [ -e /dev/kvm ]; then
+  echo "✓ /dev/kvm exists"
+  sudo chmod 666 /dev/kvm || true
+  ls -la /dev/kvm
+else
+  echo "✗ /dev/kvm not found"
+  echo "Trying to load KVM module..."
+  sudo modprobe kvm || true
+  if [ "$ARCH" = "x86_64" ]; then
+    sudo modprobe kvm_intel || sudo modprobe kvm_amd || true
+  fi
+fi
+
+# Install Zig
+echo "=== Installing Zig ==="
+ZIG_VERSION="0.14.0"
+if [ "$ARCH" = "x86_64" ]; then
+  ZIG_ARCH="x86_64"
+elif [ "$ARCH" = "aarch64" ]; then
+  ZIG_ARCH="aarch64"
+else
+  echo "Unsupported architecture: $ARCH"
+  exit 1
+fi
+
+if ! command -v zig &> /dev/null || [ "$(zig version)" != "$ZIG_VERSION" ]; then
+  curl -L "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-${ZIG_ARCH}-${ZIG_VERSION}.tar.xz" | sudo tar -xJ -C /opt
+  sudo ln -sf /opt/zig-linux-${ZIG_ARCH}-${ZIG_VERSION}/zig /usr/local/bin/zig
+fi
+zig version
+
+# Install Firecracker
+echo "=== Installing Firecracker ==="
+FC_VERSION="1.6.0"
+if [ "$ARCH" = "x86_64" ]; then
+  FC_ARCH="x86_64"
+elif [ "$ARCH" = "aarch64" ]; then
+  FC_ARCH="aarch64"
+else
+  echo "Firecracker not available for $ARCH"
+  exit 1
+fi
+
+if ! command -v firecracker &> /dev/null; then
+  curl -L "https://github.com/firecracker-microvm/firecracker/releases/download/v${FC_VERSION}/firecracker-v${FC_VERSION}-${FC_ARCH}.tgz" -o /tmp/fc.tgz
+  tar -xzf /tmp/fc.tgz -C /tmp
+  sudo mv /tmp/release-v${FC_VERSION}-${FC_ARCH}/firecracker-v${FC_VERSION}-${FC_ARCH} /usr/local/bin/firecracker
+  sudo mv /tmp/release-v${FC_VERSION}-${FC_ARCH}/jailer-v${FC_VERSION}-${FC_ARCH} /usr/local/bin/jailer
+  sudo chmod +x /usr/local/bin/firecracker /usr/local/bin/jailer
+  rm -rf /tmp/fc.tgz /tmp/release-v${FC_VERSION}-${FC_ARCH}
+fi
+firecracker --version
+
+# Setup TAP device for networking
+echo "=== Setting up TAP device ==="
+if ! ip link show tap0 &> /dev/null; then
+  sudo ip tuntap add tap0 mode tap
+  sudo ip addr add 172.16.0.1/24 dev tap0
+  sudo ip link set tap0 up
+  echo "✓ tap0 created"
+else
+  echo "✓ tap0 already exists"
+fi
+
+# Enable IP forwarding
+echo "=== Enabling IP forwarding ==="
+sudo sysctl -w net.ipv4.ip_forward=1
+sudo iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE || true
+
+# Create project directory
+mkdir -p ~/zigu
+
+echo ""
+echo "=== Setup Complete ==="
+echo "KVM:         $([ -e /dev/kvm ] && echo '✓ available' || echo '✗ not available')"
+echo "Zig:         $(zig version)"
+echo "Firecracker: $(firecracker --version | head -1)"
+echo "TAP device:  $(ip link show tap0 &>/dev/null && echo '✓ tap0' || echo '✗ missing')"
+echo ""
+echo "Ready for Zigu development!"
