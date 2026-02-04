@@ -40,11 +40,20 @@ fn haltForever() noreturn {
     }
 }
 
-export fn _start() noreturn {
+// Naked entry point - SSE is already enabled by pvh_start
+export fn _start() callconv(.Naked) noreturn {
+    // x86-64 ABI: stack must be 16-byte aligned before call
+    // pvh_start sets rsp to boot_stack_top which is 16-byte aligned
+    // call pushes 8 bytes, making it 8 mod 16 at function entry (correct)
+    asm volatile (
+        \\call kernelMain
+    );
+}
+
+export fn kernelMain() noreturn {
     _ = abi;
     serial.init();
     serial.writeAll("Cloud uKernel: booting...\n");
-    serial.writeAll("Build: M1 kernel + ABI stubs\n");
     const policy_mask = policyFor(workload.WorkloadId);
     abi.resetCapsForWorkload(policy_mask);
     workload.workloadMain();

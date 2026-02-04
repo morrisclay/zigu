@@ -109,7 +109,8 @@ fn kindIndex(kind: CapKind) usize {
 fn makeCap(kind: CapKind) handle_t {
     const tag: handle_t = @as(handle_t, HANDLE_CAP) << 56;
     const k: handle_t = (@as(handle_t, @intFromEnum(kind)) & 0xFF) << 48;
-    const gen: handle_t = cap_gen[kindIndex(kind)];
+    const idx = kindIndex(kind);
+    const gen: handle_t = cap_gen[idx];
     return tag | k | gen;
 }
 

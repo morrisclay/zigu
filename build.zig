@@ -28,7 +28,8 @@ pub fn build(b: *std.Build) void {
     // Add multiboot2 header for QEMU/GRUB boot
     exe.addAssemblyFile(b.path("kernel/multiboot.S"));
 
-    exe.entry = .{ .symbol_name = "_start" };
+    // Use pvh_start as entry for Firecracker - it enables SSE before jumping to _start
+    exe.entry = .{ .symbol_name = "pvh_start" };
     exe.pie = false;
     exe.setLinkerScript(b.path("kernel/linker.ld"));
 

@@ -1,38 +1,55 @@
 const abi = @import("abi.zig");
-const adapter = @import("adapter.zig");
+const serial = @import("serial.zig");
 
 pub const WorkloadId: u32 = 1;
 
 pub fn workloadMain() void {
-    if (abi.cap_exit() != abi.OK) return;
+    serial.writeAll("workload: starting\n");
 
-    var caps: [3]abi.handle_t = undefined;
-    if (abi.cap_acquire(abi.CAP_LOG, &caps[0]) != abi.OK) return;
-    if (abi.cap_acquire(abi.CAP_TIME, &caps[1]) != abi.OK) return;
-    if (abi.cap_acquire(abi.CAP_TASK, &caps[2]) != abi.OK) return;
-    if (abi.cap_enter(&caps[0], @intCast(caps.len)) != abi.OK) return;
+    if (abi.cap_exit() != abi.OK) {
+        serial.writeAll("workload: cap_exit failed\n");
+        return;
+    }
 
-    adapter.launch();
+    var caps: [3]abi.handle_t = [_]abi.handle_t{0} ** 3;
 
-    const hello = "workload: hello from inside the shrinkwrap\n";
+    if (abi.cap_acquire(abi.CAP_LOG, &caps[0]) != abi.OK) {
+        serial.writeAll("workload: acquire LOG failed\n");
+        return;
+    }
+    if (abi.cap_acquire(abi.CAP_TIME, &caps[1]) != abi.OK) {
+        serial.writeAll("workload: acquire TIME failed\n");
+        return;
+    }
+    if (abi.cap_acquire(abi.CAP_TASK, &caps[2]) != abi.OK) {
+        serial.writeAll("workload: acquire TASK failed\n");
+        return;
+    }
+
+    if (abi.cap_enter(&caps[0], 3) != abi.OK) {
+        serial.writeAll("workload: cap_enter failed\n");
+        return;
+    }
+    serial.writeAll("workload: entered sandbox\n");
+
+    const hello = "workload: hello from inside the sandbox\n";
     _ = abi.log_write(0, @intFromPtr(hello.ptr), hello.len);
 
     var t: abi.time_ns = 0;
     _ = abi.time_now(&t);
 
-    const msg1 = "workload: time tick = ";
+    const msg1 = "workload: time = ";
     _ = abi.log_write(0, @intFromPtr(msg1.ptr), msg1.len);
 
     var buf: [24]u8 = undefined;
     const len = u64ToDec(t, &buf);
     _ = abi.log_write(0, @intFromPtr(buf[0..len].ptr), len);
 
-    const msg2 = "\nworkload: yield\n";
-    _ = abi.log_write(0, @intFromPtr(msg2.ptr), msg2.len);
-    _ = abi.task_yield();
+    const newline = "\n";
+    _ = abi.log_write(0, @intFromPtr(newline.ptr), newline.len);
 
     var heartbeat: u64 = 0;
-    while (true) {
+    while (heartbeat < 3) : (heartbeat += 1) {
         const prefix = "workload: heartbeat ";
         _ = abi.log_write(0, @intFromPtr(prefix.ptr), prefix.len);
 
@@ -43,9 +60,10 @@ pub fn workloadMain() void {
         const suffix = "\n";
         _ = abi.log_write(0, @intFromPtr(suffix.ptr), suffix.len);
 
-        heartbeat += 1;
-        spinDelay(100_000_000);
+        _ = abi.task_yield();
     }
+
+    serial.writeAll("workload: done\n");
 }
 
 fn u64ToDec(value: u64, out: *[24]u8) usize {
@@ -68,22 +86,4 @@ fn u64ToDec(value: u64, out: *[24]u8) usize {
         j += 1;
     }
     return j;
-}
-
-fn spinDelay(cycles: u64) void {
-    var start: abi.time_ns = 0;
-    if (abi.time_now(&start) != abi.OK) {
-        var i: u64 = 0;
-        while (i < cycles) : (i += 1) {
-            _ = abi.task_yield();
-        }
-        return;
-    }
-
-    var now: abi.time_ns = 0;
-    while (true) {
-        if (abi.time_now(&now) != abi.OK) break;
-        if (now - start >= cycles) break;
-        _ = abi.task_yield();
-    }
 }
