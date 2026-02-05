@@ -205,6 +205,14 @@ def cmd_build(args):
     if not os.path.exists(kernel_src):
         print("Missing kernel artifact: zig-out/bin/ukernel", file=sys.stderr)
         return 1
+
+    # Inject PVH PT_NOTE for Firecracker (LLD strips the note during linking)
+    inject_script = os.path.join(ROOT, "scripts", "inject_pvh_note.py")
+    if os.path.exists(inject_script):
+        rc = _run_cmd([sys.executable, inject_script, kernel_src])
+        if rc != 0:
+            print("Warning: PVH note injection failed (non-fatal)", file=sys.stderr)
+
     kernel_out = os.path.join(build_dir, "vmlinux")
     shutil.copy2(kernel_src, kernel_out)
 

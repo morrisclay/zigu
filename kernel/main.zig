@@ -40,16 +40,8 @@ fn haltForever() noreturn {
     }
 }
 
-// Naked entry point - SSE is already enabled by pvh_start
-export fn _start() callconv(.Naked) noreturn {
-    // x86-64 ABI: stack must be 16-byte aligned before call
-    // pvh_start sets rsp to boot_stack_top which is 16-byte aligned
-    // call pushes 8 bytes, making it 8 mod 16 at function entry (correct)
-    asm volatile (
-        \\call kernelMain
-    );
-}
-
+// _start is defined in pvh_boot.S (64-bit entry point after mode transition).
+// Both pvh_boot.S and multiboot.S converge to _start, which calls kernelMain.
 export fn kernelMain() noreturn {
     _ = abi;
     serial.init();

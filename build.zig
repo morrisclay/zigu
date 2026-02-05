@@ -28,8 +28,11 @@ pub fn build(b: *std.Build) void {
     // Add multiboot2 header for QEMU/GRUB boot
     exe.addAssemblyFile(b.path("kernel/multiboot.S"));
 
-    // Use pvh_start as entry for Firecracker - it enables SSE before jumping to _start
-    exe.entry = .{ .symbol_name = "pvh_start" };
+    // ELF entry point is _start (set by ENTRY(_start) in linker.ld).
+    // _start is self-contained: sets up segments, SSE, stack, then calls kernelMain.
+    // Works for both Firecracker (enters at ELF entry in 64-bit mode) and
+    // multiboot (transitions to 64-bit then jumps to _start).
+    // PVH note is in pvh_boot.S but LLD strips it; a post-build step injects PT_NOTE.
     exe.pie = false;
     exe.setLinkerScript(b.path("kernel/linker.ld"));
 

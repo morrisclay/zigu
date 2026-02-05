@@ -4,14 +4,14 @@ SECTIONS
 {
   . = 1M;
 
-  /* Multiboot2 header must be in first 32KB */
-  .multiboot ALIGN(8) : {
-    KEEP(*(.multiboot))
-  }
-
   /* PVH note for Firecracker direct boot */
   .note.PVH ALIGN(4) : {
     KEEP(*(.note.PVH))
+  }
+
+  /* Multiboot2 header must be in first 32KB */
+  .multiboot ALIGN(8) : {
+    KEEP(*(.multiboot))
   }
 
   .text ALIGN(4K) : {
