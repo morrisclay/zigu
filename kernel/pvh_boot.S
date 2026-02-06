@@ -28,13 +28,14 @@ pvh_start:
     // Save hvm_start_info pointer (in ebx) for future use
     mov %ebx, %esi
 
-    // Set up identity-mapped page tables (first 1GB with 2MB pages)
-    // PML4 at 0x1000, PDPT at 0x2000, PD at 0x3000
+    // Set up identity-mapped page tables (first 4GB with 2MB pages)
+    // PML4 at 0x1000, PDPT at 0x2000, PD0-PD3 at 0x3000-0x6000
+    // 4GB needed: virtio-MMIO devices are at 0xd0000000 (~3.25GB)
 
-    // Clear page table area (0x1000..0x3FFF = 12KB)
+    // Clear page table area (0x1000..0x6FFF = 24KB)
     mov $0x1000, %edi
     xor %eax, %eax
-    mov $0x3000, %ecx
+    mov $0x6000, %ecx
     rep stosb
 
     // PML4[0] -> PDPT at 0x2000
@@ -42,15 +43,27 @@ pvh_start:
     mov $0x2003, %eax           // PDPT addr | present | writable
     mov %eax, (%edi)
 
-    // PDPT[0] -> PD at 0x3000
+    // PDPT[0] -> PD0 at 0x3000 (0-1GB)
     mov $0x2000, %edi
     mov $0x3003, %eax           // PD addr | present | writable
     mov %eax, (%edi)
 
-    // PD: 512 x 2MB pages = 1GB identity map
+    // PDPT[1] -> PD1 at 0x4000 (1-2GB)
+    mov $0x4003, %eax
+    mov %eax, 8(%edi)
+
+    // PDPT[2] -> PD2 at 0x5000 (2-3GB)
+    mov $0x5003, %eax
+    mov %eax, 16(%edi)
+
+    // PDPT[3] -> PD3 at 0x6000 (3-4GB)
+    mov $0x6003, %eax
+    mov %eax, 24(%edi)
+
+    // Fill all 4 PDs: 4 x 512 x 2MB pages = 4GB identity map
     mov $0x3000, %edi
     mov $0x83, %eax             // 2MB page | present | writable
-    mov $512, %ecx
+    mov $(512 * 4), %ecx
 1:  mov %eax, (%edi)
     add $0x200000, %eax
     add $8, %edi

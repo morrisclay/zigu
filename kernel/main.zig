@@ -46,10 +46,52 @@ fn haltForever() noreturn {
 
 // _start is defined in pvh_boot.S (64-bit entry point after mode transition).
 // Both pvh_boot.S and multiboot.S converge to _start, which calls kernelMain.
+fn readCr3() u64 {
+    return asm volatile ("mov %%cr3, %[ret]"
+        : [ret] "=r" (-> u64),
+    );
+}
+
+fn writeCr3(val: u64) void {
+    asm volatile ("mov %[val], %%cr3"
+        :
+        : [val] "r" (val),
+    );
+}
+
+// Page directory for MMIO region (3-4GB), placed in BSS
+var mmio_pd: [512]u64 align(4096) = [_]u64{0} ** 512;
+
+fn mapMmioRegion() void {
+    const cr3 = readCr3();
+    const pml4: [*]volatile u64 = @ptrFromInt(cr3);
+    const pdpt_addr = pml4[0] & 0x000FFFFFFFFFF000;
+    const pdpt: [*]volatile u64 = @ptrFromInt(pdpt_addr);
+
+    if (pdpt[3] != 0) return;
+
+    // Fill PD with 2MB identity-mapped entries for 3GB-4GB
+    var i: usize = 0;
+    while (i < 512) : (i += 1) {
+        const phys: u64 = 0xC0000000 + @as(u64, i) * 0x200000;
+        mmio_pd[i] = phys | 0x83; // present | writable | 2MB page
+    }
+
+    // Set PDPT[3] -> our PD
+    pdpt[3] = @intFromPtr(&mmio_pd) | 0x23; // present | writable | user
+
+    // Flush TLB
+    writeCr3(cr3);
+}
+
 export fn kernelMain() noreturn {
     _ = abi;
     serial.init();
     serial.writeAll("Cloud uKernel: booting...\n");
+
+    // Map MMIO region before virtio probing
+    mapMmioRegion();
+
     const policy_mask = policyFor(workload.WorkloadId);
     abi.resetCapsForWorkload(policy_mask);
     workload.workloadMain();

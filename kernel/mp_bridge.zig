@@ -4,6 +4,7 @@ const builtin = @import("builtin");
 // --- Exported functions for MicroPython C code to call ---
 
 export fn serial_write_bytes(ptr: [*]const u8, len: usize) callconv(.c) void {
+    if (len == 0) return;
     for (ptr[0..len]) |b| {
         if (b == '\n') {
             serial.writeByte('\r');
@@ -66,15 +67,12 @@ pub fn runMicroPython(source: []const u8) void {
     stack_top_ptr = @intFromPtr(&stack_dummy);
 
     // Initialize GC heap
-    gc_init(&mp_gc_heap, @as([*]u8, @ptrCast(&mp_gc_heap)) + mp_gc_heap.len);
+    const heap_start: [*]u8 = @ptrCast(&mp_gc_heap);
+    const heap_end: [*]u8 = @ptrFromInt(@intFromPtr(heap_start) + mp_gc_heap.len);
+    gc_init(heap_start, heap_end);
 
-    // Initialize MicroPython runtime
     mp_init();
-
-    // Compile and execute the source (via C helper)
     mp_do_str(source.ptr, source.len);
-
-    // Clean up
     mp_deinit();
 
     serial.writeAll("micropython: done\n");
@@ -85,8 +83,11 @@ export fn gc_collect() callconv(.c) void {
     gc_collect_start();
     var dummy: usize = 0;
     const sp = @intFromPtr(&dummy);
-    if (stack_top_ptr > sp) {
-        gc_collect_root(@ptrFromInt(sp), (stack_top_ptr - sp) / @sizeOf(usize));
+    if (stack_top_ptr > sp and sp != 0) {
+        const n_words = (stack_top_ptr - sp) / @sizeOf(usize);
+        if (n_words > 0) {
+            gc_collect_root(@ptrFromInt(sp), n_words);
+        }
     }
     gc_collect_end();
 }
