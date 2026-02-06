@@ -40,6 +40,7 @@ fi
 # --- Setup ---
 
 ROOTFS="/tmp/ukernel-boot-test.rootfs"
+TAP_DEV="tap_test$$"
 
 cleanup() {
     if [ -n "${FC_PID:-}" ] && kill -0 "$FC_PID" 2>/dev/null; then
@@ -47,10 +48,23 @@ cleanup() {
         wait "$FC_PID" 2>/dev/null || true
     fi
     rm -f "$SOCK" "$LOG" "$ROOTFS" /tmp/ukernel-empty.ext4
+    # Clean up TAP device
+    ip link del "$TAP_DEV" 2>/dev/null || true
 }
 trap cleanup EXIT
 
 rm -f "$SOCK" "$LOG"
+
+# --- Setup TAP device for networking ---
+
+setup_tap() {
+    ip tuntap add dev "$TAP_DEV" mode tap
+    ip addr add 172.16.0.1/24 dev "$TAP_DEV"
+    ip link set "$TAP_DEV" up
+    echo "  TAP device: $TAP_DEV (172.16.0.1/24)"
+}
+
+setup_tap
 
 # Create rootfs: tar archive with src/main.py for MicroPython
 # The kernel reads this as a raw block device via virtio-block and parses as tar
@@ -99,6 +113,11 @@ curl -s --unix-socket "$SOCK" -X PUT 'http://localhost/boot-source' \
 curl -s --unix-socket "$SOCK" -X PUT 'http://localhost/drives/rootfs' \
     -H 'Content-Type: application/json' \
     -d "{\"drive_id\":\"rootfs\",\"path_on_host\":\"$ROOTFS\",\"is_root_device\":true,\"is_read_only\":true}" > /dev/null
+
+# Configure network interface
+curl -s --unix-socket "$SOCK" -X PUT 'http://localhost/network-interfaces/eth0' \
+    -H 'Content-Type: application/json' \
+    -d "{\"iface_id\":\"eth0\",\"host_dev_name\":\"$TAP_DEV\",\"guest_mac\":\"AA:FC:00:00:00:01\"}" > /dev/null
 
 # Start the VM
 RESP=$(curl -s --unix-socket "$SOCK" -X PUT 'http://localhost/actions' \
@@ -152,9 +171,12 @@ check "io_poll writable" "io_poll got events=0x2"
 check "io_write via ABI" "hello via io_write"
 check "io_write ok" "io_write ok"
 check "workload completed" "workload: done"
+check "virtio_net init" "virtio_net: ready"
 check "micropython init" "micropython: init"
 check "micropython boot" "python asyncio starting"
 check "python heartbeat" "python heartbeat"
+check "python net demo" "python net: sent UDP packet"
+check "python net done" "python net: done"
 check "python complete" "python asyncio done"
 check "micropython done" "micropython: done"
 

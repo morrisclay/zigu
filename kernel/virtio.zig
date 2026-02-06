@@ -36,6 +36,7 @@ pub const STATUS_FAILED: u32 = 128;
 pub const MAGIC_VALUE: u32 = 0x74726976; // "virt" little-endian
 
 // Device types
+pub const DEVICE_NET: u32 = 1;
 pub const DEVICE_BLOCK: u32 = 2;
 
 // Firecracker MMIO device base addresses
@@ -87,13 +88,13 @@ pub const VirtioDevice = struct {
     last_used_idx: u16,
 };
 
-fn mmioRead32(base: u64, offset: u32) u32 {
+pub fn mmioRead32(base: u64, offset: u32) u32 {
     if (comptime builtin.cpu.arch != .x86_64) return 0;
     const addr: *volatile u32 = @ptrFromInt(base + offset);
     return addr.*;
 }
 
-fn mmioWrite32(base: u64, offset: u32, value: u32) void {
+pub fn mmioWrite32(base: u64, offset: u32, value: u32) void {
     if (comptime builtin.cpu.arch != .x86_64) return;
     const addr: *volatile u32 = @ptrFromInt(base + offset);
     addr.* = value;

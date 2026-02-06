@@ -1,6 +1,7 @@
 const std = @import("std");
 const serial = @import("serial.zig");
 const builtin = @import("builtin");
+const net = @import("net.zig");
 
 pub const u8_t = u8;
 pub const u16_t = u16;
@@ -93,7 +94,7 @@ var ipc_table: [MaxIpc]HandleEntry = [_]HandleEntry{.{}} ** MaxIpc;
 var net_table: [MaxNet]HandleEntry = [_]HandleEntry{.{}} ** MaxNet;
 var io_table: [MaxIo]HandleEntry = [_]HandleEntry{.{}} ** MaxIo;
 
-const IoKind = enum(u8) { none, serial };
+const IoKind = enum(u8) { none, serial, socket };
 var io_kind: [MaxIo]IoKind = [_]IoKind{.none} ** MaxIo;
 
 // Memory allocator state
@@ -252,7 +253,14 @@ pub export fn cap_acquire(kind: u32, handle_out: ?*handle_t) callconv(.c) result
             audit("cap: acquire io\n");
             return OK;
         },
-        CAP_IPC, CAP_NET, CAP_TRACE => return ERR_UNSUPPORTED,
+        CAP_NET => {
+            if ((policy_mask & capBit(.net)) == 0) return ERR_PERMISSION;
+            handle_out.?.* = makeCap(.net);
+            issued_mask |= capBit(.net);
+            audit("cap: acquire net\n");
+            return OK;
+        },
+        CAP_IPC, CAP_TRACE => return ERR_UNSUPPORTED,
         else => return ERR_INVALID,
     }
 }
@@ -509,7 +517,7 @@ pub export fn io_read(io: handle_t, buf_ptr: ptr_t, len: size_t, read_out: ?*siz
             if (n == 0) return ERR_WOULD_BLOCK;
             return OK;
         },
-        .none => return ERR_WOULD_BLOCK,
+        .socket, .none => return ERR_WOULD_BLOCK,
     }
 }
 
@@ -528,7 +536,7 @@ pub export fn io_write(io: handle_t, buf_ptr: ptr_t, len: size_t, wrote_out: ?*s
             if (wrote_out != null) wrote_out.?.* = n;
             return OK;
         },
-        .none => {
+        .socket, .none => {
             if (wrote_out != null) wrote_out.?.* = len;
             return OK;
         },
@@ -549,8 +557,16 @@ fn probeIoEvents(idx: u32) u32 {
             if (serial.rxReady()) ev |= IO_READABLE;
             if (serial.txReady()) ev |= IO_WRITABLE;
         },
-        .none => {},
+        .socket, .none => {},
     }
+    return ev;
+}
+
+fn probeNetEvents(idx: u32) u32 {
+    var ev: u32 = 0;
+    if (net.udpPollReadable(idx)) ev |= IO_READABLE;
+    // UDP sockets are always writable
+    ev |= IO_WRITABLE;
     return ev;
 }
 
@@ -576,14 +592,28 @@ pub export fn io_poll(handles: ?*handle_t, count: u32, timeout: time_ns, events_
     const handle_arr: [*]const handle_t = @ptrCast(handles.?);
     const events_buf: ?[*]io_event_t = if (events_out != 0) @ptrFromInt(events_out) else null;
 
-    // Check all handles for ready events
+    // Drain incoming network packets before polling
+    if (comptime builtin.cpu.arch == .x86_64) {
+        net.processIncoming();
+    }
+
+    // Check all handles for ready events (supports both IO and NET handles)
     const checkEvents = struct {
         fn check(h_arr: [*]const handle_t, cnt: u32, ev_buf: ?[*]io_event_t) u32 {
             var n: u32 = 0;
             var i: u32 = 0;
             while (i < cnt) : (i += 1) {
-                const id = validateHandle(io_table[0..], HANDLE_IO, h_arr[i]) orelse continue;
-                const ev = probeIoEvents(id);
+                const tag = handleTag(h_arr[i]);
+                var ev: u32 = 0;
+                if (tag == HANDLE_IO) {
+                    const id = validateHandle(io_table[0..], HANDLE_IO, h_arr[i]) orelse continue;
+                    ev = probeIoEvents(id);
+                } else if (tag == HANDLE_NET) {
+                    const id = validateHandle(net_table[0..], HANDLE_NET, h_arr[i]) orelse continue;
+                    ev = probeNetEvents(id);
+                } else {
+                    continue;
+                }
                 if (ev != 0) {
                     if (ev_buf) |buf| {
                         buf[n] = .{ .handle = h_arr[i], .events = ev };
@@ -649,34 +679,60 @@ pub export fn ipc_close(ch: handle_t) callconv(.c) result_t {
 
 pub export fn net_socket(domain: u32, type_: u32, protocol: u32, handle_out: ?*handle_t) callconv(.c) result_t {
     if (!allow(.net)) return ERR_PERMISSION;
-    _ = domain;
-    _ = type_;
-    _ = protocol;
     if (handle_out == null) return ERR_INVALID;
-    return allocHandle(net_table[0..], HANDLE_NET, handle_out.?);
+    // Only support AF_INET(2) + SOCK_DGRAM(2) + UDP(17)
+    if (domain != 2 or type_ != 2 or protocol != 17) return ERR_UNSUPPORTED;
+
+    var handle: handle_t = 0;
+    const rc = allocHandle(net_table[0..], HANDLE_NET, &handle);
+    if (rc != OK) return rc;
+
+    const idx = handleId(handle);
+    net.udpSocketInit(idx);
+    handle_out.?.* = handle;
+    return OK;
+}
+
+// net_addr_v4_t layout: ip[4] + port(u16 big-endian) = 6 bytes
+const NET_ADDR_V4_SIZE: u32 = 6;
+
+fn parseNetAddr(addr_ptr: ptr_t, addr_len: u32) ?struct { ip: [4]u8, port: u16 } {
+    if (addr_len < NET_ADDR_V4_SIZE) return null;
+    if (addr_ptr == 0) return null;
+    const ptr: [*]const u8 = @ptrFromInt(addr_ptr);
+    const ip = [4]u8{ ptr[0], ptr[1], ptr[2], ptr[3] };
+    const port: u16 = (@as(u16, ptr[4]) << 8) | @as(u16, ptr[5]);
+    return .{ .ip = ip, .port = port };
 }
 
 pub export fn net_bind(sock: handle_t, addr_ptr: ptr_t, addr_len: u32) callconv(.c) result_t {
     if (!allow(.net)) return ERR_PERMISSION;
-    _ = addr_ptr;
-    _ = addr_len;
-    if (validateHandle(net_table[0..], HANDLE_NET, sock) == null) return ERR_INVALID;
+    const idx = validateHandle(net_table[0..], HANDLE_NET, sock) orelse return ERR_INVALID;
+    const addr = parseNetAddr(addr_ptr, addr_len) orelse return ERR_INVALID;
+    if (!net.udpBind(idx, addr.port)) return ERR_INVALID;
     return OK;
 }
 
 pub export fn net_connect(sock: handle_t, addr_ptr: ptr_t, addr_len: u32) callconv(.c) result_t {
     if (!allow(.net)) return ERR_PERMISSION;
-    _ = addr_ptr;
-    _ = addr_len;
-    if (validateHandle(net_table[0..], HANDLE_NET, sock) == null) return ERR_INVALID;
+    const idx = validateHandle(net_table[0..], HANDLE_NET, sock) orelse return ERR_INVALID;
+    const addr = parseNetAddr(addr_ptr, addr_len) orelse return ERR_INVALID;
+    if (!net.udpConnect(idx, addr.ip, addr.port)) return ERR_INVALID;
     return OK;
 }
 
 pub export fn net_send(sock: handle_t, buf_ptr: ptr_t, len: size_t, flags: u32, wrote_out: ?*size_t) callconv(.c) result_t {
     if (!allow(.net)) return ERR_PERMISSION;
     _ = flags;
-    if (validateHandle(net_table[0..], HANDLE_NET, sock) == null) return ERR_INVALID;
+    const idx = validateHandle(net_table[0..], HANDLE_NET, sock) orelse return ERR_INVALID;
     if (len > 0 and buf_ptr == 0) return ERR_INVALID;
+    if (len == 0) {
+        if (wrote_out != null) wrote_out.?.* = 0;
+        return OK;
+    }
+
+    const data: [*]const u8 = @ptrFromInt(buf_ptr);
+    if (!net.udpSend(idx, data[0..len])) return ERR_IO;
     if (wrote_out != null) wrote_out.?.* = len;
     return OK;
 }
@@ -684,14 +740,27 @@ pub export fn net_send(sock: handle_t, buf_ptr: ptr_t, len: size_t, flags: u32, 
 pub export fn net_recv(sock: handle_t, buf_ptr: ptr_t, len: size_t, flags: u32, read_out: ?*size_t) callconv(.c) result_t {
     if (!allow(.net)) return ERR_PERMISSION;
     _ = flags;
-    if (validateHandle(net_table[0..], HANDLE_NET, sock) == null) return ERR_INVALID;
+    const idx = validateHandle(net_table[0..], HANDLE_NET, sock) orelse return ERR_INVALID;
     if (len > 0 and buf_ptr == 0) return ERR_INVALID;
-    if (read_out != null) read_out.?.* = 0;
-    return ERR_WOULD_BLOCK;
+
+    // Drain incoming packets first
+    if (comptime builtin.cpu.arch == .x86_64) {
+        net.processIncoming();
+    }
+
+    const buf: [*]u8 = if (buf_ptr != 0) @ptrFromInt(buf_ptr) else undefined;
+    const n = net.udpRecv(idx, buf[0..len]) orelse {
+        if (read_out != null) read_out.?.* = 0;
+        return ERR_WOULD_BLOCK;
+    };
+    if (read_out != null) read_out.?.* = n;
+    return OK;
 }
 
 pub export fn net_close(sock: handle_t) callconv(.c) result_t {
     if (!allow(.net)) return ERR_PERMISSION;
+    const idx = validateHandle(net_table[0..], HANDLE_NET, sock) orelse return ERR_INVALID;
+    net.udpSocketClose(idx);
     return closeHandle(net_table[0..], HANDLE_NET, sock);
 }
 

@@ -4,6 +4,7 @@ const abi = @import("abi.zig");
 const workload = @import("workload.zig");
 const mp_bridge = @import("mp_bridge.zig");
 const virtio_blk = @import("virtio_blk.zig");
+const virtio_net = @import("virtio_net.zig");
 const tar = @import("tar.zig");
 
 const WorkloadPolicy = struct {
@@ -18,7 +19,8 @@ const policies = [_]WorkloadPolicy{
             (1 << (abi.CAP_TIME - 1)) |
             (1 << (abi.CAP_TASK - 1)) |
             (1 << (abi.CAP_MEM - 1)) |
-            (1 << (abi.CAP_IO - 1)),
+            (1 << (abi.CAP_IO - 1)) |
+            (1 << (abi.CAP_NET - 1)),
     },
 };
 
@@ -98,6 +100,9 @@ export fn kernelMain() noreturn {
 
     // Initialize virtio block device
     const has_rootfs = virtio_blk.init();
+
+    // Initialize virtio network device
+    _ = virtio_net.init();
 
     // Try to load Python source from rootfs tar
     var py_source: ?[]const u8 = null;
