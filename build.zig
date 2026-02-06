@@ -40,6 +40,9 @@ pub fn build(b: *std.Build) void {
     exe.linkage = .static;
 
     // --- MicroPython C sources ---
+    // Compiled as a separate static library with ReleaseSmall to avoid
+    // Zig's debug-mode null pointer safety checks on C code that does
+    // benign NULL+0 pointer arithmetic (common in MicroPython internals).
     const mp_root = "lib/micropython/";
     const mp_port = "kernel/mp_port/";
 
@@ -201,19 +204,43 @@ pub fn build(b: *std.Build) void {
         mp_root ++ "shared/runtime/stdout_helpers.c",
     };
 
+    // Build MicroPython C code as a separate static library with ReleaseSmall.
+    // MicroPython's C code does benign NULL pointer arithmetic (NULL+0) which
+    // triggers Zig's debug/release-safe null pointer safety checks.
+    const mp_lib_module = b.createModule(.{
+        .target = target,
+        .optimize = .ReleaseSmall,
+        .link_libc = false,
+        .code_model = .kernel,
+        .pic = false,
+    });
+    const mp_lib = b.addLibrary(.{
+        .name = "micropython",
+        .root_module = mp_lib_module,
+        .linkage = .static,
+    });
+
     for (mp_include_paths) |inc| {
-        exe.addIncludePath(b.path(inc));
+        mp_lib.addIncludePath(b.path(inc));
     }
 
-    exe.addCSourceFiles(.{
+    mp_lib.addCSourceFiles(.{
         .files = mp_py_sources,
         .flags = mp_c_flags,
     });
 
-    exe.addCSourceFiles(.{
+    mp_lib.addCSourceFiles(.{
         .files = mp_port_sources,
         .flags = mp_c_flags,
     });
+
+    // Link MicroPython library into the kernel
+    exe.linkLibrary(mp_lib);
+
+    // Also add include paths to kernel exe for C header resolution
+    for (mp_include_paths) |inc| {
+        exe.addIncludePath(b.path(inc));
+    }
 
     b.installArtifact(exe);
 

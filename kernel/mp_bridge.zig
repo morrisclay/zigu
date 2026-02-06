@@ -3,9 +3,10 @@ const builtin = @import("builtin");
 
 // --- Exported functions for MicroPython C code to call ---
 
-export fn serial_write_bytes(ptr: [*]const u8, len: usize) callconv(.c) void {
+export fn serial_write_bytes(ptr: ?[*]const u8, len: usize) callconv(.c) void {
+    const p = ptr orelse return;
     if (len == 0) return;
-    for (ptr[0..len]) |b| {
+    for (p[0..len]) |b| {
         if (b == '\n') {
             serial.writeByte('\r');
         }
@@ -70,7 +71,6 @@ pub fn runMicroPython(source: []const u8) void {
     const heap_start: [*]u8 = @ptrCast(&mp_gc_heap);
     const heap_end: [*]u8 = @ptrFromInt(@intFromPtr(heap_start) + mp_gc_heap.len);
     gc_init(heap_start, heap_end);
-
     mp_init();
     mp_do_str(source.ptr, source.len);
     mp_deinit();
