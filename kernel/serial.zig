@@ -18,8 +18,16 @@ fn inb(port: u16) u8 {
     return 0;
 }
 
-fn txReady() bool {
+pub fn txReady() bool {
     return (inb(Com1 + 5) & 0x20) != 0;
+}
+
+pub fn rxReady() bool {
+    return (inb(Com1 + 5) & 0x01) != 0;
+}
+
+pub fn readByte() u8 {
+    return inb(Com1);
 }
 
 pub fn init() void {

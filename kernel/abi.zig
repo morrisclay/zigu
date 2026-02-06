@@ -39,6 +39,17 @@ pub const HANDLE_NET: u8 = 0x04;
 pub const HANDLE_CAP: u8 = 0x05;
 pub const HANDLE_SPAN: u8 = 0x06;
 
+pub const IO_READABLE: u32 = 0x01;
+pub const IO_WRITABLE: u32 = 0x02;
+pub const IO_HANGUP: u32 = 0x04;
+pub const IO_ERROR: u32 = 0x08;
+
+pub const io_event_t = extern struct {
+    handle: handle_t,
+    events: u32,
+    reserved: u32 = 0,
+};
+
 pub const CAP_LOG: u32 = 1;
 pub const CAP_TIME: u32 = 2;
 pub const CAP_TASK: u32 = 3;
@@ -81,6 +92,9 @@ const HandleEntry = struct {
 var ipc_table: [MaxIpc]HandleEntry = [_]HandleEntry{.{}} ** MaxIpc;
 var net_table: [MaxNet]HandleEntry = [_]HandleEntry{.{}} ** MaxNet;
 var io_table: [MaxIo]HandleEntry = [_]HandleEntry{.{}} ** MaxIo;
+
+const IoKind = enum(u8) { none, serial };
+var io_kind: [MaxIo]IoKind = [_]IoKind{.none} ** MaxIo;
 
 // Memory allocator state
 const HEAP_SIZE: usize = 1024 * 1024; // 1MB
@@ -231,7 +245,14 @@ pub export fn cap_acquire(kind: u32, handle_out: ?*handle_t) callconv(.c) result
             audit("cap: acquire mem\n");
             return OK;
         },
-        CAP_IO, CAP_IPC, CAP_NET, CAP_TRACE => return ERR_UNSUPPORTED,
+        CAP_IO => {
+            if ((policy_mask & capBit(.io)) == 0) return ERR_PERMISSION;
+            handle_out.?.* = makeCap(.io);
+            issued_mask |= capBit(.io);
+            audit("cap: acquire io\n");
+            return OK;
+        },
+        CAP_IPC, CAP_NET, CAP_TRACE => return ERR_UNSUPPORTED,
         else => return ERR_INVALID,
     }
 }
@@ -282,6 +303,8 @@ pub fn resetCapsForWorkload(mask: u32) void {
     policy_mask = mask;
     issued_mask = 0;
     active_mask = 0;
+    for (&io_kind) |*k| k.* = .none;
+    for (&io_table) |*entry| entry.* = .{};
     audit("cap: reset\n");
 }
 
@@ -439,61 +462,160 @@ pub export fn mem_unshare(_: handle_t) callconv(.c) result_t {
     return ERR_UNSUPPORTED;
 }
 
+fn pathStartsWith(path_ptr: ptr_t, prefix: []const u8) bool {
+    const ptr: [*]const u8 = @ptrFromInt(path_ptr);
+    for (prefix, 0..) |ch, i| {
+        if (ptr[i] != ch) return false;
+    }
+    return true;
+}
+
 pub export fn io_open(path_ptr: ptr_t, flags: u32, handle_out: ?*handle_t) callconv(.c) result_t {
     if (!allow(.io)) return ERR_PERMISSION;
     _ = flags;
     if (handle_out == null) return ERR_INVALID;
     if (path_ptr == 0) return ERR_INVALID;
-    return allocHandle(io_table[0..], HANDLE_IO, handle_out.?);
+
+    var handle: handle_t = 0;
+    const rc = allocHandle(io_table[0..], HANDLE_IO, &handle);
+    if (rc != OK) return rc;
+
+    const idx = handleId(handle);
+    if (pathStartsWith(path_ptr, "serial")) {
+        io_kind[idx] = .serial;
+    } else {
+        io_kind[idx] = .none;
+    }
+
+    handle_out.?.* = handle;
+    return OK;
 }
 
 pub export fn io_read(io: handle_t, buf_ptr: ptr_t, len: size_t, read_out: ?*size_t) callconv(.c) result_t {
     if (!allow(.io)) return ERR_PERMISSION;
-    if (validateHandle(io_table[0..], HANDLE_IO, io) == null) return ERR_INVALID;
+    const idx = validateHandle(io_table[0..], HANDLE_IO, io) orelse return ERR_INVALID;
     if (len > 0 and buf_ptr == 0) return ERR_INVALID;
     if (read_out != null) read_out.?.* = 0;
-    return ERR_WOULD_BLOCK;
+
+    switch (io_kind[idx]) {
+        .serial => {
+            const buf: [*]u8 = @ptrFromInt(buf_ptr);
+            var n: size_t = 0;
+            while (n < len and serial.rxReady()) {
+                buf[n] = serial.readByte();
+                n += 1;
+            }
+            if (read_out != null) read_out.?.* = n;
+            if (n == 0) return ERR_WOULD_BLOCK;
+            return OK;
+        },
+        .none => return ERR_WOULD_BLOCK,
+    }
 }
 
 pub export fn io_write(io: handle_t, buf_ptr: ptr_t, len: size_t, wrote_out: ?*size_t) callconv(.c) result_t {
     if (!allow(.io)) return ERR_PERMISSION;
-    if (validateHandle(io_table[0..], HANDLE_IO, io) == null) return ERR_INVALID;
+    const idx = validateHandle(io_table[0..], HANDLE_IO, io) orelse return ERR_INVALID;
     if (len > 0 and buf_ptr == 0) return ERR_INVALID;
-    if (wrote_out != null) wrote_out.?.* = len;
-    return OK;
+
+    switch (io_kind[idx]) {
+        .serial => {
+            const buf: [*]const u8 = @ptrFromInt(buf_ptr);
+            var n: size_t = 0;
+            while (n < len) : (n += 1) {
+                serial.writeByte(buf[n]);
+            }
+            if (wrote_out != null) wrote_out.?.* = n;
+            return OK;
+        },
+        .none => {
+            if (wrote_out != null) wrote_out.?.* = len;
+            return OK;
+        },
+    }
 }
 
 pub export fn io_close(io: handle_t) callconv(.c) result_t {
     if (!allow(.io)) return ERR_PERMISSION;
+    const idx = validateHandle(io_table[0..], HANDLE_IO, io) orelse return ERR_INVALID;
+    io_kind[idx] = .none;
     return closeHandle(io_table[0..], HANDLE_IO, io);
+}
+
+fn probeIoEvents(idx: u32) u32 {
+    var ev: u32 = 0;
+    switch (io_kind[idx]) {
+        .serial => {
+            if (serial.rxReady()) ev |= IO_READABLE;
+            if (serial.txReady()) ev |= IO_WRITABLE;
+        },
+        .none => {},
+    }
+    return ev;
 }
 
 pub export fn io_poll(handles: ?*handle_t, count: u32, timeout: time_ns, events_out: ptr_t, count_out: ?*u32) callconv(.c) result_t {
     if (!allow(.io)) return ERR_PERMISSION;
-    _ = handles;
-    _ = count;
-    _ = events_out;
-
     if (count_out != null) count_out.?.* = 0;
 
-    if (timeout == 0) {
-        return ERR_WOULD_BLOCK;
+    // Backward compat: count=0 is deadline-aware sleep
+    if (count == 0) {
+        if (timeout == 0) return ERR_WOULD_BLOCK;
+
+        const start = rdtsc();
+        while (true) {
+            if (comptime builtin.cpu.arch == .x86_64) {
+                asm volatile ("pause");
+            }
+            if (rdtsc() - start >= timeout) break;
+        }
+        return ERR_TIMEOUT;
     }
 
-    // Treat timeout as cycle budget for now (rdtsc-based).
-    var start: time_ns = 0;
-    if (time_now(&start) != OK) return ERR_UNSUPPORTED;
+    if (handles == null) return ERR_INVALID;
+    const handle_arr: [*]const handle_t = @ptrCast(handles.?);
+    const events_buf: ?[*]io_event_t = if (events_out != 0) @ptrFromInt(events_out) else null;
 
-    var now: time_ns = 0;
+    // Check all handles for ready events
+    const checkEvents = struct {
+        fn check(h_arr: [*]const handle_t, cnt: u32, ev_buf: ?[*]io_event_t) u32 {
+            var n: u32 = 0;
+            var i: u32 = 0;
+            while (i < cnt) : (i += 1) {
+                const id = validateHandle(io_table[0..], HANDLE_IO, h_arr[i]) orelse continue;
+                const ev = probeIoEvents(id);
+                if (ev != 0) {
+                    if (ev_buf) |buf| {
+                        buf[n] = .{ .handle = h_arr[i], .events = ev };
+                    }
+                    n += 1;
+                }
+            }
+            return n;
+        }
+    }.check;
+
+    // First non-blocking check
+    const found = checkEvents(handle_arr, count, events_buf);
+    if (found > 0) {
+        if (count_out != null) count_out.?.* = found;
+        return OK;
+    }
+    if (timeout == 0) return ERR_WOULD_BLOCK;
+
+    // Poll loop with timeout
+    const start = rdtsc();
     while (true) {
-        if (time_now(&now) != OK) break;
-        if (now - start >= timeout) break;
         if (comptime builtin.cpu.arch == .x86_64) {
             asm volatile ("pause");
         }
+        const n = checkEvents(handle_arr, count, events_buf);
+        if (n > 0) {
+            if (count_out != null) count_out.?.* = n;
+            return OK;
+        }
+        if (rdtsc() - start >= timeout) return ERR_TIMEOUT;
     }
-
-    return ERR_TIMEOUT;
 }
 
 pub export fn ipc_channel_create(flags: u32, handle_out: ?*handle_t) callconv(.c) result_t {
@@ -765,4 +887,83 @@ test "mem_alloc permission denied without cap" {
 
     var ptr: ptr_t = 0;
     try std.testing.expectEqual(ERR_PERMISSION, mem_alloc(64, 0, &ptr));
+}
+
+test "io_poll permission denied without CAP_IO" {
+    resetCapsForWorkload(0);
+
+    var ev_count: u32 = 0;
+    try std.testing.expectEqual(ERR_PERMISSION, io_poll(null, 0, 0, 0, &ev_count));
+}
+
+test "io_poll count=0 timeout=0 returns ERR_WOULD_BLOCK" {
+    const policy = capMask(CAP_IO);
+    resetCapsForWorkload(policy);
+
+    var cap: handle_t = 0;
+    try std.testing.expectEqual(OK, cap_acquire(CAP_IO, &cap));
+    try std.testing.expectEqual(OK, cap_enter(&cap, 1));
+
+    var ev_count: u32 = 0;
+    try std.testing.expectEqual(ERR_WOULD_BLOCK, io_poll(null, 0, 0, 0, &ev_count));
+    try std.testing.expectEqual(@as(u32, 0), ev_count);
+}
+
+test "io_open + io_close lifecycle" {
+    const policy = capMask(CAP_IO);
+    resetCapsForWorkload(policy);
+
+    var cap: handle_t = 0;
+    try std.testing.expectEqual(OK, cap_acquire(CAP_IO, &cap));
+    try std.testing.expectEqual(OK, cap_enter(&cap, 1));
+
+    var handle: handle_t = 0;
+    const path = "serial";
+    try std.testing.expectEqual(OK, io_open(@intFromPtr(path.ptr), 0, &handle));
+    try std.testing.expect(handle != 0);
+    try std.testing.expectEqual(@as(u8, HANDLE_IO), handleTag(handle));
+
+    // Verify io_kind was set
+    const idx = handleId(handle);
+    try std.testing.expectEqual(IoKind.serial, io_kind[idx]);
+
+    try std.testing.expectEqual(OK, io_close(handle));
+
+    // After close, io_kind should be reset
+    try std.testing.expectEqual(IoKind.none, io_kind[idx]);
+
+    // Double-close should fail
+    try std.testing.expectEqual(ERR_INVALID, io_close(handle));
+}
+
+test "io_poll probes serial handle" {
+    const policy = capMask(CAP_IO);
+    resetCapsForWorkload(policy);
+
+    var cap: handle_t = 0;
+    try std.testing.expectEqual(OK, cap_acquire(CAP_IO, &cap));
+    try std.testing.expectEqual(OK, cap_enter(&cap, 1));
+
+    var handle: handle_t = 0;
+    const path = "serial";
+    try std.testing.expectEqual(OK, io_open(@intFromPtr(path.ptr), 0, &handle));
+
+    // Non-blocking poll — on non-x86_64 test host, serial port I/O returns 0,
+    // so rxReady/txReady return false. Poll should return ERR_WOULD_BLOCK.
+    // On real hardware it would return IO_WRITABLE.
+    var events: [1]io_event_t = [_]io_event_t{.{ .handle = 0, .events = 0 }} ** 1;
+    var ev_count: u32 = 0;
+    const rc = io_poll(&handle, 1, 0, @intFromPtr(&events[0]), &ev_count);
+
+    if (comptime builtin.cpu.arch == .x86_64) {
+        // On x86_64 host, inb returns 0 so no events
+        try std.testing.expectEqual(ERR_WOULD_BLOCK, rc);
+        try std.testing.expectEqual(@as(u32, 0), ev_count);
+    } else {
+        // Same behavior on non-x86_64
+        try std.testing.expectEqual(ERR_WOULD_BLOCK, rc);
+        try std.testing.expectEqual(@as(u32, 0), ev_count);
+    }
+
+    _ = io_close(handle);
 }

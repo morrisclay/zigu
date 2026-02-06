@@ -63,7 +63,76 @@ pub fn workloadMain() void {
         _ = abi.task_yield();
     }
 
+    // --- io_poll demo ---
+    // Re-enter sandbox with IO capability added
+    _ = abi.cap_exit();
+
+    var io_caps: [4]abi.handle_t = [_]abi.handle_t{0} ** 4;
+    if (abi.cap_acquire(abi.CAP_LOG, &io_caps[0]) != abi.OK) {
+        serial.writeAll("workload: acquire LOG failed (io demo)\n");
+        return;
+    }
+    if (abi.cap_acquire(abi.CAP_TIME, &io_caps[1]) != abi.OK) {
+        serial.writeAll("workload: acquire TIME failed (io demo)\n");
+        return;
+    }
+    if (abi.cap_acquire(abi.CAP_TASK, &io_caps[2]) != abi.OK) {
+        serial.writeAll("workload: acquire TASK failed (io demo)\n");
+        return;
+    }
+    if (abi.cap_acquire(abi.CAP_IO, &io_caps[3]) != abi.OK) {
+        serial.writeAll("workload: acquire IO failed\n");
+        return;
+    }
+    if (abi.cap_enter(&io_caps[0], 4) != abi.OK) {
+        serial.writeAll("workload: cap_enter failed (io demo)\n");
+        return;
+    }
+
+    // Open serial via ABI
+    var io_handle: abi.handle_t = 0;
+    const serial_path = "serial";
+    if (abi.io_open(@intFromPtr(serial_path.ptr), 0, &io_handle) != abi.OK) {
+        serial.writeAll("workload: io_open serial failed\n");
+        return;
+    }
+    serial.writeAll("workload: io_open serial ok\n");
+
+    // Poll for events (non-blocking)
+    var events: [1]abi.io_event_t = [_]abi.io_event_t{.{ .handle = 0, .events = 0 }} ** 1;
+    var ev_count: u32 = 0;
+    const poll_rc = abi.io_poll(&io_handle, 1, 0, @intFromPtr(&events[0]), &ev_count);
+    if (poll_rc == abi.OK and ev_count > 0) {
+        serial.writeAll("workload: io_poll got events=0x");
+        writeU32Hex(events[0].events);
+        serial.writeAll("\n");
+    } else {
+        serial.writeAll("workload: io_poll no events\n");
+    }
+
+    // Write via ABI
+    const io_msg = "workload: hello via io_write\n";
+    var wrote: abi.size_t = 0;
+    if (abi.io_write(io_handle, @intFromPtr(io_msg.ptr), io_msg.len, &wrote) == abi.OK) {
+        serial.writeAll("workload: io_write ok\n");
+    }
+
+    _ = abi.io_close(io_handle);
     serial.writeAll("workload: done\n");
+}
+
+fn writeU32Hex(value: u32) void {
+    var shift: i32 = 28;
+    var started = false;
+    while (shift >= 0) : (shift -= 4) {
+        const nibble: u4 = @intCast((value >> @as(u5, @intCast(shift))) & 0xF);
+        if (!started and nibble == 0 and shift != 0) continue;
+        started = true;
+        const n: u8 = @intCast(nibble);
+        const ch: u8 = if (n < 10) @intCast('0' + n) else @intCast('a' + (n - 10));
+        serial.writeByte(ch);
+    }
+    if (!started) serial.writeByte('0');
 }
 
 fn u64ToDec(value: u64, out: *[24]u8) usize {

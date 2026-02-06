@@ -14,7 +14,8 @@ const policies = [_]WorkloadPolicy{
         .allowed_caps = (1 << (abi.CAP_LOG - 1)) |
             (1 << (abi.CAP_TIME - 1)) |
             (1 << (abi.CAP_TASK - 1)) |
-            (1 << (abi.CAP_MEM - 1)),
+            (1 << (abi.CAP_MEM - 1)) |
+            (1 << (abi.CAP_IO - 1)),
     },
 };
 

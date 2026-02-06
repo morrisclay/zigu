@@ -104,6 +104,18 @@ result_t mem_map(ptr_t ptr, size_t bytes, u32 flags);
 result_t mem_share(ptr_t ptr, size_t bytes, handle_t* handle_out);
 result_t mem_unshare(handle_t shared);
 
+/* I/O event flags */
+#define IO_READABLE 0x01
+#define IO_WRITABLE 0x02
+#define IO_HANGUP   0x04
+#define IO_ERROR    0x08
+
+typedef struct {
+    handle_t handle;
+    u32      events;
+    u32      reserved;
+} io_event_t;
+
 /* I/O */
 result_t io_open(ptr_t path_ptr, u32 flags, handle_t* handle_out);
 result_t io_read(handle_t io, ptr_t buf_ptr, size_t len, size_t* read_out);
