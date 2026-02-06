@@ -39,20 +39,29 @@ fi
 
 # --- Setup ---
 
+ROOTFS="/tmp/ukernel-boot-test.rootfs"
+
 cleanup() {
     if [ -n "${FC_PID:-}" ] && kill -0 "$FC_PID" 2>/dev/null; then
         kill "$FC_PID" 2>/dev/null || true
         wait "$FC_PID" 2>/dev/null || true
     fi
-    rm -f "$SOCK" "$LOG" /tmp/ukernel-empty.ext4
+    rm -f "$SOCK" "$LOG" "$ROOTFS" /tmp/ukernel-empty.ext4
 }
 trap cleanup EXIT
 
 rm -f "$SOCK" "$LOG"
 
-# Create minimal empty rootfs (Firecracker may require a root drive)
-dd if=/dev/zero of=/tmp/ukernel-empty.ext4 bs=1M count=1 status=none 2>/dev/null
-mkfs.ext4 -F -q /tmp/ukernel-empty.ext4 2>/dev/null || true
+# Create rootfs: tar archive with src/main.py for MicroPython
+# The kernel reads this as a raw block device via virtio-block and parses as tar
+if [ -f "${PROJECT_DIR}/src/main.py" ]; then
+    tar cf "$ROOTFS" -C "$PROJECT_DIR" src/main.py
+    echo "  Rootfs: tar with src/main.py"
+else
+    # Fallback: empty file
+    dd if=/dev/zero of="$ROOTFS" bs=1M count=1 status=none 2>/dev/null
+    echo "  Rootfs: empty (no src/main.py found)"
+fi
 
 echo "=== Boot Test ==="
 echo "  Firecracker: $FC_BIN"
@@ -86,10 +95,10 @@ curl -s --unix-socket "$SOCK" -X PUT 'http://localhost/boot-source' \
     -H 'Content-Type: application/json' \
     -d "{\"kernel_image_path\":\"$KERNEL\",\"boot_args\":\"console=ttyS0 reboot=k panic=1\"}" > /dev/null
 
-# Configure minimal rootfs drive
+# Configure rootfs drive (tar archive for virtio-block)
 curl -s --unix-socket "$SOCK" -X PUT 'http://localhost/drives/rootfs' \
     -H 'Content-Type: application/json' \
-    -d '{"drive_id":"rootfs","path_on_host":"/tmp/ukernel-empty.ext4","is_root_device":true,"is_read_only":true}' > /dev/null
+    -d "{\"drive_id\":\"rootfs\",\"path_on_host\":\"$ROOTFS\",\"is_root_device\":true,\"is_read_only\":true}" > /dev/null
 
 # Start the VM
 RESP=$(curl -s --unix-socket "$SOCK" -X PUT 'http://localhost/actions' \
@@ -143,6 +152,11 @@ check "io_poll writable" "io_poll got events=0x2"
 check "io_write via ABI" "hello via io_write"
 check "io_write ok" "io_write ok"
 check "workload completed" "workload: done"
+check "micropython init" "micropython: init"
+check "micropython boot" "python asyncio starting"
+check "python heartbeat" "python heartbeat"
+check "python complete" "python asyncio done"
+check "micropython done" "micropython: done"
 
 echo ""
 if [ "$FAIL" -eq 0 ]; then

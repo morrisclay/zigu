@@ -2,6 +2,9 @@ const std = @import("std");
 const serial = @import("serial.zig");
 const abi = @import("abi.zig");
 const workload = @import("workload.zig");
+const mp_bridge = @import("mp_bridge.zig");
+const virtio_blk = @import("virtio_blk.zig");
+const tar = @import("tar.zig");
 
 const WorkloadPolicy = struct {
     id: u32,
@@ -50,5 +53,24 @@ export fn kernelMain() noreturn {
     const policy_mask = policyFor(workload.WorkloadId);
     abi.resetCapsForWorkload(policy_mask);
     workload.workloadMain();
+
+    // Initialize virtio block device
+    const has_rootfs = virtio_blk.init();
+
+    // Try to load Python source from rootfs tar
+    var py_source: ?[]const u8 = null;
+    if (has_rootfs) {
+        py_source = tar.findFile("src/main.py");
+        if (py_source != null) {
+            serial.writeAll("micropython: loaded src/main.py from rootfs\n");
+        } else {
+            serial.writeAll("micropython: src/main.py not found in rootfs\n");
+        }
+    }
+
+    // Run MicroPython with loaded source or fallback demo
+    const source = py_source orelse "print('hello from micropython')";
+    mp_bridge.runMicroPython(source);
+
     haltForever();
 }

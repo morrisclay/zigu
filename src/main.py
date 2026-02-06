@@ -1,18 +1,16 @@
-import asyncio
-import time
+import ukernel
 
-# Golden example workload for adapter integration testing.
-# Emits a heartbeat and performs a simple async sleep loop.
+def heartbeat():
+    for i in range(3):
+        ukernel.log("python heartbeat " + str(i))
+        ukernel.sleep_ms(100)
 
-async def heartbeat():
-    while True:
-        ts = time.time()
-        print(f"heartbeat {ts}")
-        await asyncio.sleep(1)
+def main():
+    ukernel.log("python asyncio starting")
+    ukernel.log("ukernel version: " + ukernel.version())
+    t0 = ukernel.time_ms()
+    ukernel.log("boot time: " + str(t0) + " ms")
+    heartbeat()
+    ukernel.log("python asyncio done")
 
-async def main():
-    print("worker starting")
-    await heartbeat()
-
-if __name__ == "__main__":
-    asyncio.run(main())
+main()

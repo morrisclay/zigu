@@ -281,20 +281,29 @@ def cmd_pack(args):
     if os.path.exists(rootfs_dir):
         shutil.rmtree(rootfs_dir)
     _ensure_dir(rootfs_dir)
-    _ensure_dir(os.path.join(rootfs_dir, "adapter"))
+
+    # Copy src/ directly so kernel can find src/main.py in tar
+    src_dir = os.path.join(ROOT, "src")
+    if os.path.isdir(src_dir):
+        shutil.copytree(src_dir, os.path.join(rootfs_dir, "src"))
     shutil.copy2(os.path.join(ROOT, "ukernel.toml"), os.path.join(rootfs_dir, "ukernel.toml"))
-    shutil.copy2(bundle_src, os.path.join(rootfs_dir, "bundle.tgz"))
     env_src = os.path.join(ROOT, "env", "ukernel.env")
     if os.path.exists(env_src):
         _ensure_dir(os.path.join(rootfs_dir, "env"))
         shutil.copy2(env_src, os.path.join(rootfs_dir, "env", "ukernel.env"))
     if os.path.isdir(adapter_src):
+        _ensure_dir(os.path.join(rootfs_dir, "adapter"))
         shutil.copytree(adapter_src, os.path.join(rootfs_dir, "adapter", "python-3.12"))
+    if os.path.exists(bundle_src):
+        shutil.copy2(bundle_src, os.path.join(rootfs_dir, "bundle.tgz"))
 
+    # Create uncompressed tar rootfs (kernel reads this directly via virtio-block)
     rootfs_tar = os.path.join(dist_dir, f"{name}.rootfs.tar")
     with tarfile.open(rootfs_tar, "w") as tar:
-        tar.add(rootfs_dir, arcname=".")
+        for entry in sorted(os.listdir(rootfs_dir)):
+            tar.add(os.path.join(rootfs_dir, entry), arcname=entry)
 
+    # Also create ext4 image if mkfs is available
     mkfs = shutil.which("mkfs.ext4") or shutil.which("mke2fs")
     if mkfs:
         image_path = args.image or os.path.join(dist_dir, f"{name}.ext4")
